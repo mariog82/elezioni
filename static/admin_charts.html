@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grafici</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<header><h1>Grafici</h1><div>Dashboard grafica</div></header>
+<main>
+
+<section class="card">
+  <h2>Statistiche aggiornate automaticamente</h2>
+  <p class="small">
+    I grafici usano i dati salvati sul server. Se importi le preferenze totali dei consiglieri,
+    la web app aggiorna anche i voti delle liste collegate sommando le preferenze importate.
+  </p>
+</section>
+
+<section class="card topbar">
+<button class="secondary" onclick="location.href='/admin'">Pannello admin</button>
+<div>
+<button onclick="loadDashboard()">Aggiorna</button>
+
+<button class="secondary" onclick="location.href='/'">Torna all'app</button>
+</div>
+</section>
+<section class="grid">
+<div class="card"><h2>Candidati sindaco - torta</h2><canvas id="mayorPieChart"></canvas></div>
+<div class="card"><h2>Liste - torta</h2><canvas id="listPieChart"></canvas></div>
+</section>
+<section class="card">
+<h2>Liste - istogramma</h2>
+<canvas id="listBarChart"></canvas>
+</section>
+<section class="card">
+<h2>Grafici di dettaglio per seggio</h2>
+<p class="small">Dettaglio per PARTITO DEMOCRATICO, MOVIMENTO 5STELLE e CITTA' APERTA - CONTROCORRENTE.</p>
+<div class="tabs">
+<button class="tab active" id="tabChartsLists" onclick="showChartTab('lists')">Liste per seggio</button>
+<button class="tab" id="tabChartsPrefs" onclick="showChartTab('prefs')">Candidati per seggio</button>
+</div>
+<div id="chartTabLists" class="chartTab"></div>
+<div id="chartTabPrefs" class="chartTab hidden"></div>
+</section>
+<section class="card"><h2>Tabelle candidato-preferenze</h2>
+<p class="small">Ogni tab mostra tutti i candidati della lista, anche con zero preferenze.</p>
+<div id="prefTableTabs" class="tabs"></div>
+<div id="prefTables"></div>
+</section>
+</main>
+<script src="/admin.js"></script>
+</body>
+</html>
