@@ -498,3 +498,22 @@ Questa versione aggiunge una vera area di intelligence politica e due nuove pagi
    - testi social pronti;
    - link pubblico condivisibile.
 
+
+## Versione v60 - Login iniziale e UX user friendly
+
+Questa versione introduce una prima schermata di accesso dedicata (`/`) e sposta l'area operativa su `/app`.
+
+### Migliorie principali
+- Login iniziale moderno e guidato con reindirizzamento automatico in base al ruolo.
+- Protezione lato server delle pagine amministrative: gli utenti non autenticati tornano al login; i rappresentanti non accedono all'admin.
+- Layout più chiaro per la pagina di rilevazione: sidebar utente, stato autosalvataggio, navigazione rapida e sezione operativa più leggibile.
+- Form più accessibili: focus evidenziato, pulsanti disabilitati durante il login, guida credenziali demo.
+- Migliore esperienza mobile con header adattivo e card più leggibili.
+
+### Percorsi principali
+- `/` login iniziale
+- `/app` rilevazione voti
+- `/admin` pannello amministratore
+- `/admin/intelligence` Political Intelligence Platform
+- `/admin/social` Funzionalità social virali
+- `/public-dashboard` dashboard pubblica

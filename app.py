@@ -4,7 +4,7 @@ import re
 import io
 import json
 
-from flask import Flask, request, jsonify, send_from_directory, session, Response
+from flask import Flask, request, jsonify, send_from_directory, session, Response, redirect
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from datetime import datetime
@@ -818,38 +818,83 @@ def compute_elected(conn):
     }
 
 @app.route("/")
+def login_page():
+    # Prima schermata: accesso guidato. Se già autenticato porta l'utente alla propria area.
+    user = current_user()
+    if user:
+        return redirect("/admin" if user["role"] == "admin" else "/app")
+    return send_from_directory(STATIC_DIR, "login.html")
+
+@app.route("/app")
 def index():
+    if not current_user():
+        return redirect("/")
     return send_from_directory(STATIC_DIR, "index.html")
 
 @app.route("/admin")
 def admin_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin.html")
 
 
 @app.route("/admin/charts")
 def admin_charts_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_charts.html")
 
 @app.route("/admin/imports")
 def admin_imports_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_imports.html")
 
 @app.route("/admin/users")
 def admin_users_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_users.html")
 
 
 @app.route("/admin/tools")
 def admin_tools_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_tools.html")
 
 
 @app.route("/admin/intelligence")
 def admin_intelligence_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_intelligence.html")
 
 @app.route("/admin/social")
 def admin_social_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_social.html")
 
 @app.route("/public-dashboard")
