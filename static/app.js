@@ -59,13 +59,13 @@ async function autoSave(){
 
 async function start(){
   const token=new URLSearchParams(location.search).get("token");
-  if(token){try{await api("/api/login",{method:"POST",body:JSON.stringify({token})});history.replaceState({},"","/")}catch(e){alert("QR non valido")}}
-  try{const me=await api("/api/me");user=me.user;await showApp()}catch(e){}
+  if(token){try{await api("/api/login",{method:"POST",body:JSON.stringify({token})});history.replaceState({},"","/app")}catch(e){alert("QR non valido")}}
+  try{const me=await api("/api/me");user=me.user;await showApp()}catch(e){ location.href="/" }
 }
 async function login(){
   try{const d=await api("/api/login",{method:"POST",body:JSON.stringify({phone:phone.value.trim(),pin:pin.value.trim()})});user=d.user;await showApp()}catch(e){alert(e.message)}
 }
-async function logout(){await api("/api/logout",{method:"POST",body:"{}"});location.reload()}
+async function logout(){await api("/api/logout",{method:"POST",body:"{}"});location.href="/"}
 async function logoutClosed(){await logout()}
 
 async function showApp(){
