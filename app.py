@@ -1759,9 +1759,12 @@ def _read_csv_file(max_rows=10000):
         "nome lista",
         "voti validi",
         "numero sind",
+        "numero sindaco",
         "candidato sindaco",
         "numero cons",
+        "numero candidato",
         "nome cons",
+        "nome candidato",
         "schede nulle",
         "schede bianche"
     ]
@@ -1771,6 +1774,29 @@ def _read_csv_file(max_rows=10000):
 
     return rows
 
+
+
+def _save_election_data_to_settings():
+    """Persistenza delle anagrafiche elettorali aggiornate dall'amministratore."""
+    conn = db()
+    conn.execute(
+        "INSERT OR REPLACE INTO settings(key, value) VALUES('election_data_json', ?)",
+        (json.dumps(ELECTION_DATA, ensure_ascii=False),)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _ensure_mayor_votes_for_existing_reports(mayor_names):
+    """Aggiunge i candidati sindaco importati anche ai report/sezioni già creati."""
+    conn = db()
+    cur = conn.cursor()
+    rows = cur.execute("SELECT id FROM reports").fetchall()
+    for report in rows:
+        for mayor in mayor_names:
+            _upsert_vote(cur, report["id"], "sindaco", mayor, 0, None)
+    conn.commit()
+    conn.close()
 
 def _import_votes(kind, by_section):
     try:
@@ -1823,7 +1849,7 @@ def _import_votes(kind, by_section):
 
                 elif kind == "sindaci":
                     if len(row) < off + 4:
-                        raise ValueError("formato richiesto: [Sezione;]Numero Sind;Candidato Sindaco;Voti validi;Voti solo Sind")
+                        raise ValueError("formato richiesto: [Sezione;]Numero Sindaco;Candidato Sindaco;Voti validi;Voti solo Sind")
                     nome_sindaco = str(row[off + 1]).strip()
                     mayor = _resolve_mayor(nome_sindaco, row[off])
                     if not mayor:
@@ -1835,7 +1861,7 @@ def _import_votes(kind, by_section):
 
                 elif kind == "consiglieri":
                     if len(row) < off + 5:
-                        raise ValueError("formato richiesto: [Sezione;]Numero Liste;Nome Lista;Numero Cons;Nome Cons;Voti validi")
+                        raise ValueError("formato richiesto: [Sezione;]Numero Liste;Nome Lista;Numero Candidato;Nome Candidato;Voti validi")
                     nome_lista = str(row[off + 1]).strip()
                     list_name = _resolve_list(nome_lista, row[off])
                     if not list_name:
@@ -1843,7 +1869,7 @@ def _import_votes(kind, by_section):
                     nome_cons = str(row[off + 3]).strip()
                     candidate = _resolve_candidate(list_name, nome_cons, row[off + 2])
                     if not candidate:
-                        raise ValueError(f"Nome Cons non trovato in app.py per lista {list_name}: {nome_cons}")
+                        raise ValueError(f"Nome Candidato non trovato in app.py per lista {list_name}: {nome_cons}")
                     votes = _intv(row[off + 4])
                     _upsert_vote(cur, report_id, "preferenza", candidate, votes, list_name)
                     list_totals_from_preferences[(report_id, list_name)] = list_totals_from_preferences.get((report_id, list_name), 0) + votes
@@ -1889,6 +1915,67 @@ def _import_votes(kind, by_section):
         "skipped": skipped,
         "errors": errors,
         "message": f"Import completato. Righe assegnate {imported}, righe saltate {skipped}."
+    })
+
+
+@app.post("/api/import/sindaci-priority")
+@admin_required
+def import_sindaci_priority():
+    """
+    Importazione prioritaria dell'anagrafica candidati sindaco.
+    Formato CSV obbligatorio: Numero Sindaco;Candidato Sindaco
+    Sostituisce l'elenco dei candidati sindaco mantenendo liste, coalizioni e consiglieri già presenti.
+    """
+    global ELECTION_DATA
+    try:
+        rows = _read_csv_file(max_rows=1000)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Errore lettura CSV: {str(exc)}"}), 400
+
+    parsed = []
+    skipped = 0
+    errors = []
+    seen = set()
+
+    for idx, row in enumerate(rows, start=1):
+        try:
+            if len(row) < 2:
+                raise ValueError("formato richiesto: Numero Sindaco;Candidato Sindaco")
+            raw_number = str(row[0]).strip()
+            name = str(row[1]).strip()
+            if not name:
+                raise ValueError("Candidato Sindaco mancante")
+            norm = _norm(name)
+            if norm in seen:
+                skipped += 1
+                continue
+            seen.add(norm)
+            try:
+                order = int(raw_number)
+            except Exception:
+                order = 999999 + idx
+            parsed.append((order, idx, name.upper()))
+        except Exception as exc:
+            skipped += 1
+            if len(errors) < 50:
+                errors.append(f"Riga {idx}: {str(exc)}")
+
+    if not parsed:
+        return jsonify({"ok": False, "error": "Nessun candidato sindaco valido trovato nel CSV", "errors": errors}), 400
+
+    parsed.sort(key=lambda item: (item[0], item[1]))
+    ELECTION_DATA["mayors"] = [name for _, __, name in parsed]
+    _save_election_data_to_settings()
+    _ensure_mayor_votes_for_existing_reports(ELECTION_DATA["mayors"])
+
+    return jsonify({
+        "ok": True,
+        "imported": len(ELECTION_DATA["mayors"]),
+        "skipped": skipped,
+        "errors": errors,
+        "message": f"Importazione prioritaria sindaci completata. Candidati sindaco aggiornati: {len(ELECTION_DATA['mayors'])}. Righe saltate: {skipped}."
     })
 
 @app.post("/api/import/liste")

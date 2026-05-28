@@ -314,23 +314,23 @@ APP_SECRET_KEY=<chiave_lunga_casuale>
 
 ## Versione v39
 - Nell'import CSV il confronto di `Nome Lista` avviene tutto in minuscolo/normalizzato.
-- Nell'import CSV il confronto di `Nome Cons` avviene tutto in minuscolo/normalizzato.
+- Nell'import CSV il confronto di `Nome Candidato` avviene tutto in minuscolo/normalizzato.
 - Il numero lista e il numero consigliere restano fallback se il nome non viene riconosciuto.
 
 
 ## Versione v40
 - Dopo il caricamento CSV, i voti delle liste vengono assegnati confrontando `Nome Lista` con i nomi presenti in `ELECTION_DATA` dentro `app.py`.
-- I voti dei consiglieri vengono assegnati confrontando `Nome Cons` con i candidati presenti in `ELECTION_DATA` dentro `app.py`.
-- `Numero Liste` e `Numero Cons` non vengono più usati per attribuire il voto, evitando associazioni errate.
+- I voti dei consiglieri vengono assegnati confrontando `Nome Candidato` con i candidati presenti in `ELECTION_DATA` dentro `app.py`.
+- `Numero Liste` e `Numero Candidato` non vengono più usati per attribuire il voto, evitando associazioni errate.
 - Il confronto è normalizzato: minuscolo, senza accenti, senza spazi/punteggiatura.
 
 
 ## Versione v41
 - Corretto matching import CSV per voti di lista e preferenze consiglieri.
 - I voti di lista sono assegnati confrontando `Nome Lista` del CSV con i nomi lista in `ELECTION_DATA` di app.py.
-- Le preferenze sono assegnate confrontando `Nome Cons` del CSV con i candidati della lista in `ELECTION_DATA` di app.py.
+- Le preferenze sono assegnate confrontando `Nome Candidato` del CSV con i candidati della lista in `ELECTION_DATA` di app.py.
 - Il confronto è normalizzato: minuscolo, senza accenti, senza spazi e punteggiatura.
-- `Numero Liste` e `Numero Cons` non vengono usati per attribuire i voti.
+- `Numero Liste` e `Numero Candidato` non vengono usati per attribuire i voti.
 
 
 ## Versione v42
@@ -448,7 +448,7 @@ APP_SECRET_KEY=<chiave_lunga_casuale>
 - Aggiunta in testa alla pagina Importazione la sezione:
   `Importazione prioritaria consiglieri`
 - Formato CSV:
-  `Numero Lista;Nome Lista;Numero Cons;Nome Cons;Voti validi`
+  `Numero Lista;Nome Lista;Numero Candidato;Nome Candidato;Voti validi`
 - L'import aggiorna automaticamente:
   - voti consiglieri;
   - voti lista collegata;
@@ -517,3 +517,20 @@ Questa versione introduce una prima schermata di accesso dedicata (`/`) e sposta
 - `/admin/intelligence` Political Intelligence Platform
 - `/admin/social` Funzionalità social virali
 - `/public-dashboard` dashboard pubblica
+
+
+## Importazioni prioritarie aggiornate
+
+La pagina di importazione contiene ora due riquadri affiancati:
+
+- **Importazione prioritaria sindaci** con formato obbligatorio `Numero Sindaco;Candidato Sindaco`. Questo import aggiorna l'anagrafica dei candidati sindaco e la salva nelle impostazioni della piattaforma.
+- **Importazione prioritaria consiglieri** con formato obbligatorio `Numero Lista;Nome Lista;Numero Candidato;Nome Candidato;Voti validi`.
+
+Sono stati uniformati tutti i layout e i messaggi CSV:
+
+- `Numero Sind` è ora `Numero Sindaco`;
+- `Numero Cons` è ora `Numero Candidato`;
+- `Nome Cons` è ora `Nome Candidato`.
+
+Per compatibilità, il lettore CSV continua a riconoscere anche eventuali vecchie intestazioni già presenti nei file storici, ma l'interfaccia mostra solo il nuovo formato.
+
