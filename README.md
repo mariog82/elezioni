@@ -523,7 +523,7 @@ Questa versione introduce una prima schermata di accesso dedicata (`/`) e sposta
 
 La pagina di importazione contiene ora due riquadri affiancati:
 
-- **Importazione prioritaria sindaci** con formato obbligatorio `Numero Sindaco;Candidato Sindaco`. Questo import aggiorna l'anagrafica dei candidati sindaco e la salva nelle impostazioni della piattaforma.
+- **Importazione prioritaria sindaci** con formato obbligatorio `Numero Sindaco;Candidato Sindaco` e separatore obbligatorio punto e virgola `;`. Questo import aggiorna l'anagrafica dei candidati sindaco e la salva nelle impostazioni della piattaforma.
 - **Importazione prioritaria consiglieri** con formato obbligatorio `Numero Lista;Nome Lista;Numero Candidato;Nome Candidato;Voti validi`.
 
 Sono stati uniformati tutti i layout e i messaggi CSV:

@@ -1714,10 +1714,12 @@ def _intv(value, default=0):
         return default
 
 
-def _read_csv_file(max_rows=10000):
+def _read_csv_file(max_rows=10000, preferred_delimiter=None):
     """
     Lettura CSV standardizzata per tutti gli import.
-    Separatore obbligatorio: ;
+    Accetta automaticamente CSV separati da ; oppure da ,.
+    Per l'importazione prioritaria sindaci il formato consigliato è:
+    Numero Sindaco;Candidato Sindaco
     """
     if "file" not in request.files:
         raise ValueError("File CSV mancante")
@@ -1734,7 +1736,17 @@ def _read_csv_file(max_rows=10000):
 
     text = raw.decode("utf-8-sig", errors="ignore")
 
-    reader = csv.reader(io.StringIO(text), delimiter=";")
+    sample = "\n".join([line for line in text.splitlines() if line.strip()][:5])
+    if preferred_delimiter in (";", ","):
+        delimiter = preferred_delimiter
+    else:
+        try:
+            delimiter = csv.Sniffer().sniff(sample, delimiters=";,").delimiter
+        except Exception:
+            first = sample.splitlines()[0] if sample else ""
+            delimiter = "," if first.count(",") > first.count(";") else ";"
+
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
 
     rows = []
 
@@ -1751,7 +1763,7 @@ def _read_csv_file(max_rows=10000):
         raise ValueError(f"CSV troppo grande. Massimo {max_rows} righe")
 
     # Rimozione automatica intestazione
-    first_line = ";".join(rows[0]).lower()
+    first_line = delimiter.join(rows[0]).lower()
 
     header_keywords = [
         "sezione",
@@ -1928,7 +1940,7 @@ def import_sindaci_priority():
     """
     global ELECTION_DATA
     try:
-        rows = _read_csv_file(max_rows=1000)
+        rows = _read_csv_file(max_rows=1000, preferred_delimiter=";")
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
