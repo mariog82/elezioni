@@ -11,29 +11,38 @@
 <main>
 
 <section class="card priority-import">
-  <h2>Importazione prioritaria consiglieri</h2>
+  <h2>Importazioni prioritarie</h2>
   <p class="small">
-    Import rapido delle preferenze dei consiglieri. Questo import aggiorna automaticamente:
+    Import rapidi per aggiornare subito l'anagrafica dei candidati sindaco e le preferenze dei consiglieri.
+    I file CSV devono usare il separatore <b>;</b>.
   </p>
-  <ul class="small">
-    <li>voti del consigliere;</li>
-    <li>voti della lista collegata;</li>
-    <li>grafici e statistiche.</li>
-  </ul>
 
-  <div class="card">
-    <h3>CSV consiglieri totali</h3>
-    <p class="small">
-      Formato obbligatorio:<br>
-      <b>Numero Lista;Nome Lista;Numero Cons;Nome Cons;Voti validi</b>
-    </p>
+  <div class="grid two priority-grid">
+    <div class="card">
+      <h3>Importazione prioritaria sindaci</h3>
+      <p class="small">
+        Formato obbligatorio:<br>
+        <b>Numero Sindaco;Candidato Sindaco</b>
+      </p>
+      <input type="file" id="csv_priority_sindaci" accept=".csv,text/csv">
+      <button class="primary"
+        onclick="importGenericCsv('csv_priority_sindaci','/api/import/sindaci-priority')">
+        Importa candidati sindaco
+      </button>
+    </div>
 
-    <input type="file" id="csv_priority_consiglieri" accept=".csv,text/csv">
-
-    <button class="primary"
-      onclick="importGenericCsv('csv_priority_consiglieri','/api/import/consiglieri')">
-      Importa consiglieri
-    </button>
+    <div class="card">
+      <h3>Importazione prioritaria consiglieri</h3>
+      <p class="small">
+        Formato obbligatorio:<br>
+        <b>Numero Lista;Nome Lista;Numero Candidato;Nome Candidato;Voti validi</b>
+      </p>
+      <input type="file" id="csv_priority_consiglieri" accept=".csv,text/csv">
+      <button class="primary"
+        onclick="importGenericCsv('csv_priority_consiglieri','/api/import/consiglieri')">
+        Importa consiglieri
+      </button>
+    </div>
   </div>
 </section>
 
@@ -55,7 +64,7 @@
   <div class="grid">
     <div class="card">
       <h3>Voti totali candidati sindaco</h3>
-      <p class="small">Formato: <b>Numero Sind;Candidato Sindaco;Voti validi;Voti solo Sind</b></p>
+      <p class="small">Formato: <b>Numero Sindaco;Candidato Sindaco;Voti validi;Voti solo Sind</b></p>
       <input type="file" id="csv_tot_sindaci" accept=".csv,text/csv">
       <button onclick="importGenericCsv('csv_tot_sindaci','/api/import/sindaci')">Importa sindaci totali</button>
     </div>
@@ -69,7 +78,7 @@
 
     <div class="card">
       <h3>Preferenze totali consiglieri</h3>
-      <p class="small">Formato: <b>Numero Liste;Nome Lista;Numero Cons;Nome Cons;Voti validi</b></p>
+      <p class="small">Formato: <b>Numero Liste;Nome Lista;Numero Candidato;Nome Candidato;Voti validi</b></p>
       <input type="file" id="csv_tot_consiglieri" accept=".csv,text/csv">
       <button onclick="importGenericCsv('csv_tot_consiglieri','/api/import/consiglieri')">Importa consiglieri totali</button>
     </div>
@@ -108,7 +117,7 @@
   <div class="grid">
     <div class="card">
       <h3>Voti candidati sindaco per sezione</h3>
-      <p class="small">Formato: <b>Sezione;Numero Sind;Candidato Sindaco;Voti validi;Voti solo Sind</b></p>
+      <p class="small">Formato: <b>Sezione;Numero Sindaco;Candidato Sindaco;Voti validi;Voti solo Sind</b></p>
       <input type="file" id="csv_sez_sindaci" accept=".csv,text/csv">
       <button onclick="importGenericCsv('csv_sez_sindaci','/api/import/sindaci-sezioni')">Importa sindaci per sezione</button>
     </div>
@@ -122,7 +131,7 @@
 
     <div class="card">
       <h3>Preferenze consiglieri per sezione</h3>
-      <p class="small">Formato: <b>Sezione;Numero Liste;Nome Lista;Numero Cons;Nome Cons;Voti validi</b></p>
+      <p class="small">Formato: <b>Sezione;Numero Liste;Nome Lista;Numero Candidato;Nome Candidato;Voti validi</b></p>
       <input type="file" id="csv_sez_consiglieri" accept=".csv,text/csv">
       <button onclick="importGenericCsv('csv_sez_consiglieri','/api/import/consiglieri-sezioni')">Importa consiglieri per sezione</button>
     </div>
