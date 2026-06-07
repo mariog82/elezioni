@@ -571,3 +571,11 @@ Nota: il modulo blockchain è predisposto come audit/notarizzazione applicativa.
 - Aggiunto blocco automatico dell'inserimento voti se l'anagrafica non è completa.
 - Aggiunta guida tecnica `GUIDA_MODULI_PREMIUM.md` per Blockchain Electoral Audit, DAO, NFT, OSINT, Social & Viral e Political Intelligence Platform.
 - Commentati `app.py` e i moduli JavaScript premium per facilitare manutenzione e sviluppo in produzione.
+
+
+## Aggiornamento v68 - dashboard operativa
+
+- Nella pagina `/app` non viene più mostrato il pulsante **Esci** nella sezione laterale accanto alla Dashboard pubblica.
+- Se l’utente autenticato ha ruolo `admin`, sotto **Dashboard pubblica** compare il pulsante **Torna al pannello Admin**.
+- La dashboard operativa visualizza sempre le anagrafiche caricate: candidati sindaco, liste e candidati consiglieri, lette dall’endpoint `/api/config`.
+- L’importazione prioritaria consiglieri conserva anche il numero lista, così la sezione “Liste e candidati consiglieri” mostra dati più completi.

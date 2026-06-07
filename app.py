@@ -117,7 +117,7 @@ def anagraphics_loaded():
     La webapp consente grafici e inserimento voti solo se l'admin ha caricato
     almeno un candidato sindaco e almeno una lista con candidati consiglieri.
     """
-    return bool(ELECTION_DATA.get("mayors")) and bool(ELECTION_DATA.get("lists"))
+    return bool(ELECTION_DATA.get("mayors")) and bool(ELECTION_DATA.get("lists")) and any(len(v.get("candidates", [])) for v in ELECTION_DATA.get("lists", {}).values())
 
 
 def anagraphics_status_payload():
@@ -1778,7 +1778,7 @@ def import_consiglieri_priority():
     clean_lists = {}
     for list_name, obj in lists.items():
         ordered_candidates = [name for _, __, name in sorted(obj["candidates"], key=lambda x: (x[0], x[1]))]
-        clean_lists[list_name] = {"coalition": obj["coalition"], "candidates": ordered_candidates}
+        clean_lists[list_name] = {"number": obj.get("number", ""), "coalition": obj["coalition"], "candidates": ordered_candidates}
 
     ELECTION_DATA["lists"] = clean_lists
     _save_election_data_to_settings()
