@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, send_from_directory, session, Respons
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from datetime import datetime
-import sqlite3, os, secrets, math
+import sqlite3, os, secrets, math, hashlib
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "database.sqlite")
@@ -548,6 +548,33 @@ def _safe_split_votes(value):
     except Exception:
         return []
 
+
+MODULE_CATALOG = {
+    "intelligence": {"title": "Political Intelligence Platform", "area": "Premium", "path": "/admin/intelligence", "description": "Heatmap territoriale, reti body politico, predizione AI-like e peso politico reale."},
+    "social": {"title": "Funzionalità social virali", "area": "Growth", "path": "/admin/social", "description": "Dashboard pubbliche condivisibili, card virali e Political Score."},
+    "blockchain": {"title": "Blockchain Electoral Audit, DAO e NFT", "area": "Trust/Web3", "path": "/admin/blockchain", "description": "Audit hash dei dati, registro simulato, DAO civica e gamification NFT elettorali."},
+    "osint": {"title": "Modulo investigativo / OSINT politico", "area": "Investigativo", "path": "/admin/osint", "description": "Raccolta fonti aperte, segnali reputazionali, alert territoriali e schede candidate/liste."},
+    "simulator": {"title": "Simulatore elettorale", "area": "Scenario", "path": "/admin/simulator", "description": "Scenari su affluenza, swing liste/sindaci, seggi e impatto sul peso politico."}
+}
+DEFAULT_MODULES = {key: True for key in MODULE_CATALOG}
+
+def get_module_config(conn):
+    row = conn.execute("SELECT value FROM settings WHERE key='module_config_json'").fetchone()
+    try:
+        data = json.loads(row["value"]) if row else {}
+    except Exception:
+        data = {}
+    return {key: bool(data.get(key, DEFAULT_MODULES.get(key, True))) for key in MODULE_CATALOG}
+
+def save_module_config(conn, data):
+    clean = {key: bool(data.get(key, False)) for key in MODULE_CATALOG}
+    conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('module_config_json', ?)", (json.dumps(clean),))
+    return clean
+
+def module_enabled(key):
+    conn = db(); cfg = get_module_config(conn); conn.close()
+    return cfg.get(key, False)
+
 def fast_pin_hash(pin):
     # Import CSV: hashing volutamente leggero per evitare timeout su Render.
     # check_password_hash resta compatibile con questo formato Werkzeug.
@@ -626,7 +653,8 @@ def init_db():
         "council_seats": "24",
         "winner_mayor": "NICOLA BARBERA",
         "mode": "first",
-        "election_data_json": json.dumps(ELECTION_DATA, ensure_ascii=False)
+        "election_data_json": json.dumps(ELECTION_DATA, ensure_ascii=False),
+        "module_config_json": json.dumps(DEFAULT_MODULES, ensure_ascii=False)
     }
     for key, value in defaults.items():
         cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
@@ -878,6 +906,47 @@ def admin_tools_page():
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_tools.html")
 
+@app.route("/admin/modules")
+def admin_modules_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
+    return send_from_directory(STATIC_DIR, "admin_modules.html")
+
+@app.route("/admin/blockchain")
+def admin_blockchain_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
+    if not module_enabled("blockchain"):
+        return redirect("/admin/modules")
+    return send_from_directory(STATIC_DIR, "admin_blockchain.html")
+
+@app.route("/admin/osint")
+def admin_osint_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
+    if not module_enabled("osint"):
+        return redirect("/admin/modules")
+    return send_from_directory(STATIC_DIR, "admin_osint.html")
+
+@app.route("/admin/simulator")
+def admin_simulator_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if user["role"] != "admin":
+        return redirect("/app")
+    if not module_enabled("simulator"):
+        return redirect("/admin/modules")
+    return send_from_directory(STATIC_DIR, "admin_simulator.html")
 
 @app.route("/admin/intelligence")
 def admin_intelligence_page():
@@ -886,6 +955,8 @@ def admin_intelligence_page():
         return redirect("/")
     if user["role"] != "admin":
         return redirect("/app")
+    if not module_enabled("intelligence"):
+        return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_intelligence.html")
 
 @app.route("/admin/social")
@@ -895,6 +966,8 @@ def admin_social_page():
         return redirect("/")
     if user["role"] != "admin":
         return redirect("/app")
+    if not module_enabled("social"):
+        return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_social.html")
 
 @app.route("/public-dashboard")
@@ -2453,6 +2526,113 @@ def export_csv():
         mimetype="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=report_comunali_barcellona.csv"},
     )
+
+
+@app.get("/api/modules")
+@admin_required
+def get_modules_api():
+    conn = db()
+    cfg = get_module_config(conn)
+    conn.close()
+    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": cfg.get(k, False)} for k in MODULE_CATALOG]
+    return jsonify({"ok": True, "modules": modules, "config": cfg})
+
+@app.post("/api/modules")
+@admin_required
+def save_modules_api():
+    data = request.get_json(force=True).get("modules", {})
+    conn = db()
+    cfg = save_module_config(conn, data)
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "config": cfg, "message": "Moduli aggiornati"})
+
+def _rows_for_audit(conn):
+    return conn.execute("""
+        SELECT r.id, r.section, r.voters, r.blank_ballots, r.null_ballots, r.contested_ballots,
+               r.split_votes_json, r.closed, r.updated_at, u.name AS user_name
+        FROM reports r LEFT JOIN users u ON u.id=r.user_id
+        ORDER BY CAST(r.section AS INTEGER), r.section
+    """).fetchall()
+
+@app.get("/api/blockchain")
+@admin_required
+def blockchain_api():
+    if not module_enabled("blockchain"):
+        return jsonify({"ok": False, "error": "Modulo blockchain non attivo"}), 403
+    conn = db()
+    rows = _rows_for_audit(conn)
+    chain = []
+    previous = "GENESIS"
+    for index, r in enumerate(rows, start=1):
+        payload = {k: r[k] for k in r.keys()}
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        data_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        block_hash = hashlib.sha256((previous + data_hash + str(index)).encode("utf-8")).hexdigest()
+        chain.append({"index": index, "section": r["section"], "updated_at": r["updated_at"], "representative": r["user_name"], "data_hash": data_hash, "previous_hash": previous, "block_hash": block_hash, "status": "verificato"})
+        previous = block_hash
+    modules = get_module_config(conn)
+    conn.close()
+    nft_badges = [
+        {"name": "Sezione certificata", "trigger": "Verbale chiuso e hashato", "utility": "Badge pubblico di trasparenza"},
+        {"name": "Sentinella civica", "trigger": "Controllo OSINT o audit completato", "utility": "Reputazione volontari"},
+        {"name": "Milestone elettorale", "trigger": "100% sezioni acquisite", "utility": "Archivio storico condivisibile"},
+        {"name": "Partecipazione DAO", "trigger": "Proposta o voto civico", "utility": "Accesso a consultazioni interne"}
+    ]
+    dao = {"proposal_types": ["Bilancio partecipativo", "Priorità di quartiere", "Monitoraggio programma", "Consultazioni interne"], "roles": ["cittadino verificato", "osservatore", "moderatore", "admin"], "governance": "Token non speculativo/reputazionale, voto ponderabile per presenza civica e verifica identità.", "enabled": modules.get("blockchain", False)}
+    return jsonify({"ok": True, "chain": chain, "last_hash": previous, "nft_badges": nft_badges, "dao": dao})
+
+@app.get("/api/osint")
+@admin_required
+def osint_api():
+    if not module_enabled("osint"):
+        return jsonify({"ok": False, "error": "Modulo OSINT non attivo"}), 403
+    conn = db()
+    payload = _intelligence_payload(conn)
+    conn.close()
+    alerts = []
+    for a in payload["body_graph"]["alerts"][:40]:
+        alerts.append({"type": "concentrazione territoriale", "subject": a["candidate"], "area": "Sezione " + str(a["section"]), "risk": a["level"], "evidence": f"{a['votes']} preferenze, {a['section_pref_share_pct']}% nella sezione"})
+    for h in payload["heatmap"]:
+        if h.get("split_rate_pct", 0) >= 15:
+            alerts.append({"type": "voto disgiunto elevato", "subject": h.get("top_mayor") or "n/d", "area": "Sezione " + str(h["section"]), "risk": "attenzione", "evidence": f"{h['split_vote_count']} disgiunti, {h['split_rate_pct']}%"})
+    sources = [
+        {"name": "Albo pretorio e delibere", "use": "Verifica atti, incarichi, finanziamenti e reti amministrative"},
+        {"name": "Social network pubblici", "use": "Mappatura engagement, temi ricorrenti e sentiment"},
+        {"name": "Open data elettorali", "use": "Storico sezioni, turnout, swing e confronto territoriale"},
+        {"name": "Rassegna stampa locale", "use": "Eventi critici, endorsement, controversie e reputazione"}
+    ]
+    return jsonify({"ok": True, "alerts": alerts[:80], "sources": sources, "summary": payload["summary"], "disclaimer": "Usare solo fonti aperte, dati leciti e valutazioni verificabili. Non sostituisce indagini ufficiali."})
+
+@app.post("/api/simulator")
+@admin_required
+def simulator_api():
+    if not module_enabled("simulator"):
+        return jsonify({"ok": False, "error": "Modulo simulatore non attivo"}), 403
+    data = request.get_json(force=True)
+    turnout_delta = float(data.get("turnout_delta", 0) or 0)
+    mayor_swing = float(data.get("mayor_swing", 0) or 0)
+    list_swing = float(data.get("list_swing", 0) or 0)
+    target_mayor = str(data.get("target_mayor", "") or "")
+    target_list = str(data.get("target_list", "") or "")
+    conn = db()
+    base = _intelligence_payload(conn)
+    seats = compute_seats(conn)
+    conn.close()
+    factor = max(0.1, 1 + turnout_delta / 100.0)
+    mayors = []
+    for m in base["prediction"]["mayors"]:
+        projected = float(m["projected"]) * factor
+        if target_mayor and m["name"] == target_mayor:
+            projected *= (1 + mayor_swing / 100.0)
+        mayors.append({**m, "simulated": round(projected)})
+    lists = []
+    for l in base["prediction"]["lists"]:
+        projected = float(l["projected"]) * factor
+        if target_list and l["name"] == target_list:
+            projected *= (1 + list_swing / 100.0)
+        lists.append({**l, "simulated": round(projected)})
+    mayors.sort(key=lambda x: -x["simulated"]); lists.sort(key=lambda x: -x["simulated"])
+    return jsonify({"ok": True, "scenario": {"turnout_delta": turnout_delta, "mayor_swing": mayor_swing, "list_swing": list_swing, "target_mayor": target_mayor, "target_list": target_list}, "mayors": mayors, "lists": lists, "base_seats": seats, "note": "Simulazione esplorativa calcolata sui dati caricati e sulle proiezioni correnti."})
 
 if __name__ == "__main__":
     init_db()

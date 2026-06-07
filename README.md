@@ -534,3 +534,30 @@ Sono stati uniformati tutti i layout e i messaggi CSV:
 
 Per compatibilità, il lettore CSV continua a riconoscere anche eventuali vecchie intestazioni già presenti nei file storici, ma l'interfaccia mostra solo il nuovo formato.
 
+
+## Versione v64 - Political Intelligence Platform modulare
+
+Questa versione trasforma la webapp in una piattaforma modulare. L'amministratore può aprire **Moduli premium** dal pannello admin e attivare/disattivare singolarmente:
+
+- **Political Intelligence Platform**: heatmap territoriale del consenso, analisi reti clientelari/body politico, predizione elettorale AI-like, peso politico reale.
+- **Funzionalità social virali**: dashboard pubbliche condivisibili, card social e Political Score.
+- **Blockchain Electoral Audit / DAO / NFT**: registro hash SHA-256 dei dati di sezione, simulazione blockchain, DAO civica e gamification con NFT/badge elettorali.
+- **Modulo investigativo / OSINT politico**: fonti aperte consigliate, alert su concentrazioni territoriali e voto disgiunto elevato.
+- **Simulatore elettorale**: scenari con variazione affluenza, swing su sindaci/liste e confronto base/simulato.
+
+### Nuove rotte principali
+
+- `/admin/modules` gestione moduli e autorizzazioni funzionali.
+- `/admin/blockchain` Blockchain Electoral Audit, DAO e NFT.
+- `/admin/osint` OSINT politico.
+- `/admin/simulator` simulatore elettorale.
+
+### API aggiunte
+
+- `GET /api/modules` elenco moduli.
+- `POST /api/modules` salvataggio moduli attivi.
+- `GET /api/blockchain` audit hash e registro blocchi.
+- `GET /api/osint` alert OSINT e fonti aperte.
+- `POST /api/simulator` simulazione scenario elettorale.
+
+Nota: il modulo blockchain è predisposto come audit/notarizzazione applicativa. Per una produzione reale può essere collegato a Polygon, Base, Arbitrum, Ethereum o Hyperledger tramite smart contract o ancoraggio periodico dell'hash finale.
