@@ -75,12 +75,22 @@ async function showApp(){
   if(isAdmin()){
     const adminBtn=document.getElementById("adminBtn");
     const topAdminLink=document.getElementById("topAdminLink");
-    if(adminBtn){adminBtn.classList.remove("hidden"); adminBtn.textContent="Torna al pannello Admin";}
-    if(topAdminLink){topAdminLink.classList.remove("hidden"); topAdminLink.textContent="Pannello Admin";}
+    if(adminBtn){
+      adminBtn.classList.remove("hidden");
+      adminBtn.style.display="block";
+      adminBtn.textContent="Torna al pannello amministratore";
+    }
+    if(topAdminLink){
+      topAdminLink.classList.remove("hidden");
+      topAdminLink.style.display="inline-flex";
+      topAdminLink.textContent="Pannello amministratore";
+    }
   }
-  const cfg=await api("/api/config"); DATA=cfg.data; settings=cfg.settings; anagraphics=cfg.anagraphics;
+  const cfg=await api("/api/config");
+  DATA = (isAdmin() && cfg.all_data) ? cfg.all_data : cfg.data;
+  settings=cfg.settings; anagraphics=cfg.anagraphics;
   if(!anagraphics?.loaded){ showMissingAnagraphics(); return; }
-  initState(); renderAll(); renderAnagraphicsOverview(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
+  initState(); renderAll(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
 }
 function showMissingAnagraphics(){
   const app=document.getElementById("appBox");
@@ -125,22 +135,34 @@ async function loadExisting(){
 function renderAnagraphicsOverview(){
   const box=document.getElementById("anagraphicsOverview");
   if(!box || !DATA) return;
-  const mayors=(DATA.mayors||[]).map(m=>`<span class="badge">${esc(m)}</span>`).join(" ") || "<span class='small'>Nessun sindaco caricato.</span>";
-  const lists=Object.entries(DATA.lists||{}).map(([lname,obj])=>{
-    const candidates=(obj.candidates||[]).map(c=>`<li>${esc(c)}</li>`).join("");
-    return `<details class="listDetails" open><summary><b>${esc(lname)}</b> <span class="small">Numero lista: ${esc(obj.number||'—')} · Coalizione/Sindaco: ${esc(obj.coalition||'—')} · ${(obj.candidates||[]).length} candidati</span></summary><ol>${candidates}</ol></details>`;
-  }).join("") || "<p class='small'>Nessuna lista caricata.</p>";
-  box.innerHTML=`<div class="overviewBlock"><h3>Candidati sindaco</h3><div class="badgeWrap">${mayors}</div></div><div class="overviewBlock"><h3>Liste e consiglieri</h3>${lists}</div>`;
+  const mayorsArr = DATA.mayors || [];
+  const listsObj = DATA.lists || {};
+  const mayors = mayorsArr.length
+    ? `<div class="tablewrap"><table><thead><tr><th>N.</th><th>Candidato sindaco caricato</th></tr></thead><tbody>${mayorsArr.map((m,i)=>`<tr><td>${i+1}</td><td><b>${esc(m)}</b></td></tr>`).join("")}</tbody></table></div>`
+    : "<p class='small warnText'>Nessun candidato sindaco caricato. Importare prima il CSV sindaci dal pannello amministratore.</p>";
+  const lists = Object.entries(listsObj).length
+    ? Object.entries(listsObj).map(([lname,obj])=>{
+        const candidates=(obj.candidates||[]).map((c,i)=>`<tr><td>${i+1}</td><td>${esc(c)}</td></tr>`).join("");
+        return `<details class="listDetails" open><summary><b>${esc(lname)}</b> <span class="small">Numero lista: ${esc(obj.number||'—')} · Coalizione/Sindaco: ${esc(obj.coalition||'—')} · ${(obj.candidates||[]).length} candidati</span></summary><div class="tablewrap"><table><thead><tr><th>N.</th><th>Nome candidato consigliere</th></tr></thead><tbody>${candidates || '<tr><td colspan="2">Nessun consigliere caricato.</td></tr>'}</tbody></table></div></details>`;
+      }).join("")
+    : "<p class='small warnText'>Nessuna lista/consigliere caricato. Importare il CSV liste/consiglieri dal pannello amministratore.</p>";
+  box.innerHTML=`<div class="overviewBlock"><h3>Candidati sindaco caricati</h3>${mayors}</div><div class="overviewBlock"><h3>Liste e candidati consiglieri caricati</h3>${lists}</div>`;
 }
 
 function renderAll(){ renderMayors(); renderTabs(); renderListPanel(); renderSplitVotes(); renderAnagraphicsOverview(); }
 function renderMayors(){
   const box=mayorList; box.innerHTML="";
+  if(!DATA.mayors || !DATA.mayors.length){
+    box.innerHTML="<p class='small warnText'>Nessun candidato sindaco presente. Caricare il CSV sindaci dal pannello amministratore.</p>";
+    return;
+  }
   DATA.mayors.forEach(m=>box.appendChild(voteRow(m,"mayor",null)));
 }
 function renderTabs(){
   tabs.innerHTML="";
-  Object.keys(DATA.lists).forEach(l=>{
+  const names=Object.keys(DATA.lists||{});
+  if(!names.length){ tabs.innerHTML="<p class='small warnText'>Nessuna lista presente. Caricare il CSV liste/consiglieri dal pannello amministratore.</p>"; return; }
+  names.forEach(l=>{
     const b=document.createElement("button"); b.className="tab"+(l===currentList?" active":""); b.textContent=l; b.onclick=()=>{currentList=l; renderTabs(); renderListPanel();}; tabs.appendChild(b);
   });
 }
@@ -172,13 +194,30 @@ function updateValidationBox(){
 function sumSplitVotes(){return splitVotes.reduce((a,x)=>a+(parseInt(x.votes||0,10)||0),0)}
 
 function renderSplitSelectors(){
-  splitMayor.innerHTML=DATA.mayors.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("");
-  splitList.innerHTML=Object.keys(DATA.lists).map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("");
-  splitList.onchange=()=>{ const l=splitList.value; splitCandidate.innerHTML=(DATA.lists[l]?.candidates||[]).map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join(""); };
-  splitList.onchange();
+  const mayorSel=document.getElementById("splitMayor");
+  const listSel=document.getElementById("splitList");
+  const candSel=document.getElementById("splitCandidate");
+  if(!mayorSel || !listSel || !candSel || !DATA) return;
+  const mayors=DATA.mayors||[];
+  const lists=Object.keys(DATA.lists||{});
+  mayorSel.innerHTML = mayors.length
+    ? mayors.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("")
+    : `<option value="">Caricare prima i candidati sindaco</option>`;
+  listSel.innerHTML = lists.length
+    ? lists.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")
+    : `<option value="">Caricare prima liste/consiglieri</option>`;
+  listSel.onchange=()=>{
+    const l=listSel.value;
+    const candidates=(DATA.lists?.[l]?.candidates)||[];
+    candSel.innerHTML = candidates.length
+      ? candidates.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("")
+      : `<option value="">Nessun consigliere disponibile</option>`;
+  };
+  listSel.onchange();
 }
 function addSplitVote(){
   const mayor=splitMayor.value, list=splitList.value, candidate=splitCandidate.value, votes=Math.max(1,parseInt(splitCount.value||1,10)||1);
+  if(!mayor || !list){ alert("Per registrare il voto disgiunto devi prima caricare sindaci, liste e consiglieri dal pannello amministratore."); return; }
   const coalition=DATA.lists[list]?.coalition;
   const isSplit= mayor && list && coalition && mayor!==coalition;
   splitVotes.push({mayor,list,candidate,votes,is_split:isSplit,coalition});

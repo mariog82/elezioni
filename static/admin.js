@@ -1,3 +1,8 @@
+async function adminLogout(){
+  try{await fetch('/api/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}
+  location.href='/';
+}
+
 
 let mayorPieChart=null,listPieChart=null,listBarChart=null,lastData=null;
 let detailCharts=[];
