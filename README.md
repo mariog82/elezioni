@@ -561,3 +561,13 @@ Questa versione trasforma la webapp in una piattaforma modulare. L'amministrator
 - `POST /api/simulator` simulazione scenario elettorale.
 
 Nota: il modulo blockchain è predisposto come audit/notarizzazione applicativa. Per una produzione reale può essere collegato a Polygon, Base, Arbitrum, Ethereum o Hyperledger tramite smart contract o ancoraggio periodico dell'hash finale.
+
+## Aggiornamento v65
+
+- L'anagrafica elettorale iniziale è stata svuotata: nessun sindaco, lista o consigliere è precaricato.
+- Prima di inserire voti o visualizzare grafici bisogna caricare:
+  1. `Numero Sindaco;Candidato Sindaco`
+  2. `Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato`
+- Aggiunto blocco automatico dell'inserimento voti se l'anagrafica non è completa.
+- Aggiunta guida tecnica `GUIDA_MODULI_PREMIUM.md` per Blockchain Electoral Audit, DAO, NFT, OSINT, Social & Viral e Political Intelligence Platform.
+- Commentati `app.py` e i moduli JavaScript premium per facilitare manutenzione e sviluppo in produzione.

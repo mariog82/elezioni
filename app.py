@@ -1,3 +1,28 @@
+"""
+Political Intelligence Platform - backend Flask
+================================================
+
+Il file app.py contiene il backend principale della piattaforma.
+Le sezioni sono organizzate in modo modulare:
+
+1. Configurazione generale e database SQLite.
+2. Anagrafica elettorale vuota e caricabile da CSV.
+3. Autenticazione utenti/admin/rappresentanti.
+4. API operative per inserimento voti, quadratura e voto disgiunto.
+5. API admin per importazioni CSV, utenti, impostazioni e reset.
+6. Moduli premium attivabili: Intelligence, Social, Blockchain, OSINT, Simulatore.
+7. Endpoint pubblici aggregati per dashboard condivisibili.
+
+Scelta progettuale v65:
+- non ci sono più sindaci/liste precaricati;
+- l'admin deve importare prima le anagrafiche;
+- se l'anagrafica manca, il backend blocca inserimento voti e moduli analitici.
+
+Nota produzione:
+SQLite è adatto a demo/prototipo. Per uso reale preferire PostgreSQL,
+backup automatici, logging, HTTPS, rate limit e gestione segreti via variabili ambiente.
+"""
+
 import unicodedata
 import csv
 import re
@@ -17,491 +42,26 @@ STATIC_DIR = os.path.join(APP_DIR, "static")
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 app.secret_key = os.environ.get("APP_SECRET_KEY", secrets.token_hex(32))
 
+# -----------------------------------------------------------------------------
+# ANAGRAFICA ELETTORALE INIZIALE
+# -----------------------------------------------------------------------------
+# La piattaforma parte volutamente VUOTA.
+# Motivo operativo: grafici, inserimento voti, importazioni per sezione,
+# simulazioni e moduli premium devono basarsi su anagrafiche caricate
+# dall'amministratore, non su candidati precompilati o dati dimostrativi.
+# Prima di usare l'app bisogna quindi importare, in ordine:
+#   1. candidati sindaco: Numero Sindaco;Candidato Sindaco
+#   2. liste/coalizioni/consiglieri: Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato
+# I dati vengono poi salvati in settings.election_data_json.
 ELECTION_DATA = {
-  "mayors": [
-    "NICOLA BARBERA",
-    "DAVID BONGIOVANNI",
-    "MELANGELA SCOLARO"
-  ],
-  "lists": {
-    "CITTA' APERTA - CONTROCORRENTE": {
-      "coalition": "DAVID BONGIOVANNI",
-      "candidates": [
-        "BEN R'HOUMA MONIA",
-        "CAMPO RAFFAELLA",
-        "CENTINEO PIETRO",
-        "CHIOFALO GAETANO",
-        "CICERO ANTONINO",
-        "CRINÒ PIETRO",
-        "GATTIGNOLO ELISA",
-        "GIGLIO ANTONIO MARIO",
-        "MAIO ANTONINO",
-        "MAMÌ ANTONIO DARIO",
-        "MATERIA CLAUDIO",
-        "MIRABILE KATIA",
-        "NASELLI DOMENICA ADELE DETTA MIMMA",
-        "PARATORE SEBASTIANO GIUSEPPE MARCO",
-        "POMA ELENA ALBERTINA",
-        "PULIAFITO SALVATORE GIOVANNI",
-        "PUTZU GIOVANNA",
-        "RIVILLI NOELIA JACQUELINE",
-        "SALERNI ANGELO",
-        "SIDOTI GABRIELE",
-        "SIRACUSA CARMELA",
-        "TORRE GIOVANNA",
-        "VALENTI MARIA CARMEN",
-        "YAHIAOUI AYOUB"
-      ]
-    },
-    "MOVIMENTO 5STELLE": {
-      "coalition": "DAVID BONGIOVANNI",
-      "candidates": [
-        "ARRIGO ANTONINO",
-        "CAMBRIA ANGELINO DETTO LINUCCIO",
-        "CIMINELLI ERIKA",
-        "COPPOLINO MARIA PIA",
-        "CORRADO FABRIZIO",
-        "DONNINA GIOVANNI",
-        "EL HESSANIA ABDELKRIM DETTO KARIM",
-        "GENOVESE BIAGIO",
-        "GIGLIO RUGGERO DETTO RUGGERO",
-        "GIORGIANNI VERA DETTA VERA",
-        "GIUNTA ANTONINO",
-        "GIUNTA GABRIELLA",
-        "INFANTINO MARCO",
-        "MAZZEO ANGELO",
-        "MIRABILE ALESSANDRA ROSARIA",
-        "PRESTI STEFANIA",
-        "RECUPERO GAETANO",
-        "TURRISI GIUSEPPE DETTO GEPI"
-      ]
-    },
-    "PARTITO DEMOCRATICO": {
-      "coalition": "DAVID BONGIOVANNI",
-      "candidates": [
-        "BONGIOVANNI DAVID",
-        "CALAMUNERI ORAZIO",
-        "CERAOLO CARMELO MICHELE",
-        "CUCUMO STEFANIA",
-        "DI PASQUALE FRANCESCO DETTO FRANCO",
-        "EPIFANIO STEFANIA",
-        "FLORAMO DOMENICA DETTA DOMINGA",
-        "FRANCHINA LOREDANA",
-        "GAROFALO MARIO",
-        "GITTO LORENZO",
-        "IMBESI GIANLUCA",
-        "IMMESI ILENIA DETTA ILENIA",
-        "LEMBO GIUSY DETTA GIUSI",
-        "MANCUSO FELICE",
-        "MOSTACCIO DOMENICA",
-        "NICHITELLEA NICOLETA MARIANA DETTA NICOLETTA",
-        "SAIJA STEFANO ANTONIO",
-        "SANTANOCITA FRANCESCA",
-        "SPINELLA PAOLO",
-        "TORRE ROSARIA DETTA SARA",
-        "TUJIRI KHADIJA DETTA GIGIA",
-        "TURRISI ANTONIO",
-        "VAZZA MILENA",
-        "ZANGLA ANGELA"
-      ]
-    },
-    "DE LUCA SINDACO DI SICILIA": {
-      "coalition": "MELANGELA SCOLARO",
-      "candidates": [
-        "DOMINGA ACCETTA",
-        "SEBASTIANO BORGHESE",
-        "ANGELA MARIA CALATOZZO",
-        "CLAUDIA CAPPELLANO",
-        "PRANVERA CECAJ",
-        "GIUSEPPE CRISAFULLI",
-        "LUCA CUCINOTTA",
-        "NUNZIATA GRAZIELLA D’AMICO DETTA D’AMICO NANCY",
-        "CLAUDIO FEBO",
-        "SIMONA GITTO",
-        "VANESSA LO MONACO",
-        "FRANCESCA LUCIA MANDANICI DETTA FRANCESCA MANDANICI",
-        "CLARISSA MARCINI",
-        "ANNALISA MUNAFÒ",
-        "CELESTINA NANIA",
-        "PAOLO PINO",
-        "GIUSEPPE PULIAFITO DETTO RUBENS",
-        "FEDERICO SCARPACI",
-        "SERGIO VITO SCOLARO DETTO SERGIO SCOLARO",
-        "GIULIA MARIA SIDOTI DETTA GIULIA",
-        "FABIANA SIMONETTA",
-        "ANTONIO SOFIA",
-        "RITA SPICCIA",
-        "NICOLA TORRE"
-      ]
-    },
-    "AVREMO CURA DI TE": {
-      "coalition": "MELANGELA SCOLARO",
-      "candidates": [
-        "GRAZIANO ANGELO ACCETTA DETTO GRAZIANO",
-        "MARIADRIANA ALOISI",
-        "CRISTIAN BAMBACI",
-        "GIAN FRANCO BRIGANDÌ",
-        "EMANUELA BUCCA",
-        "CARMELO BUCCA",
-        "SANTA CALIRI",
-        "SALVATORE CALLISTO",
-        "BARBARA CAVALLARO",
-        "SERENA MARIA CONSOLI",
-        "SEBASTIANO CORICA",
-        "VINCENZO FOTI",
-        "GIUSEPPE ISGRÒ",
-        "GIUSEPPE LAQUIDARA DETTO GIUSEPPE LAGUIDARA DETTO GIUSEPPE LA GUIDARA",
-        "EMANUELE MUNAFÒ",
-        "ROSARIO CARMELO NATALE DETTO ROSARIO NATALE",
-        "VALENTINA GIUSY PANTÈ",
-        "MAURIZIO PIZZUTO",
-        "GISELLA PUDDU",
-        "GABRIELE SPINA"
-      ]
-    },
-    "SCOLARO SINDACO": {
-      "coalition": "MELANGELA SCOLARO",
-      "candidates": [
-        "NIEVIS MARIA ACCETTA DETTA NIVES ACCETTA",
-        "CONCETTA ALOSI DETTA CETTY ALOSI",
-        "ANASTASI MARCO DETTO MARCO NASTASI",
-        "FORTUNATO BARBARO",
-        "SARA ASSUNTA AGOSTINA BASILICÒ DETTA SARA BASILICÒ",
-        "GIOVANNI BENENATI",
-        "VINCENZA BRIGANDÌ",
-        "FILIPPO CASTELLANO",
-        "ORAZIO CICCIARI",
-        "TINDARO DI PASQUALE",
-        "COSTANZA GALLO",
-        "LUANA CARMEN MACCARI DETTA LUANA MACCARI",
-        "ALESSIA MERLINO",
-        "ALESSANDRO NANIA",
-        "SALVATORE PRESTI",
-        "CARMELITA PREVITI",
-        "SALVATORE PULIAFITO",
-        "GIOVANNA STEFANIA PUNTURO DETTA GIOVANNA",
-        "SIMONA CLEMENTINA ROSINA DETTA SIMONA ROSINA",
-        "SANDY SIRACUSA DETTA SENDY SIRACUSA",
-        "ROSALBA CINZIA SMEDILE DETTA CINZIA SMEDILE",
-        "GIUSEPPE SOTTILE",
-        "STEFANO STURNIOLO",
-        "GIOVANNI VALENTI"
-      ]
-    },
-    "UNA MARCIA IN PIU'": {
-      "coalition": "MELANGELA SCOLARO",
-      "candidates": [
-        "AMALIA ABBATE",
-        "LUCA ARCORACI",
-        "CARMELO BILARDO",
-        "ANTONINO BIONDO",
-        "COSIMO BUCCA",
-        "CARMELA CALABRESE",
-        "LUCIA CALIRI",
-        "ANTONINO COMPOSTO",
-        "ROSARIO CONDIPODERO",
-        "VINCENZO CRINÒ",
-        "MIRKO FORTUNATO DE PASQUALE",
-        "HABDERRAMIN EL HORCHE DETTO ABRAMO",
-        "ELIDA GURAY",
-        "ZEZEM IBTISEM DETTA SEM",
-        "GIOVANNA LO CASCIO",
-        "DARIO ANGELO MAIMONE",
-        "ROBERTA MARIA MANCUSO DETTA ROBERTA",
-        "SALVATORE RAGUSA",
-        "IGNAZIO ROTELLA",
-        "BENEDETTO RUSSO",
-        "MELANGELA SCOLARO",
-        "ANTONINO SOTTILE",
-        "GUGLIELMO TORRE",
-        "JOSÈ ANGELO VIRGILLITO DETTO VIRGILLITO"
-      ]
-    },
-    "BARCELLONA POZZO DI GOTTO IN COMUNE": {
-      "coalition": "MELANGELA SCOLARO",
-      "candidates": [
-        "GIUSEPPE ABBATE",
-        "PAOLO CALABRÒ",
-        "CARMELO FABIO CAPPELLANO DETTO FABIO",
-        "LEONE CASILE",
-        "WALTER GIUSEPPE COPPOLINO",
-        "GIUSEPPE CRISAFULLI",
-        "GIAN PAOLO GENOVESE",
-        "FRANCESCA MARIAPIA GIUNTA",
-        "FRANCESCO GIUNTA",
-        "SANTINA GIUNTA",
-        "GIUSEPPA PASQUA GRASSO DETTA GIUSY",
-        "ANTONINO LIZIO DETTO ANTHONY",
-        "ALESSANDRA MAIO",
-        "GIUSEPPE MANDANICI",
-        "MELANIA ANTONELLA MAZZEO",
-        "GAETANO MERCADANTE",
-        "CRISTINA MIANO",
-        "ROSARIO MOLICA FRANCO",
-        "STEFANO ANTONINO PELLEGRINO",
-        "DONATO RAIMONDO",
-        "FILIPPO RUSSO",
-        "MARIA DONATELLA SOTTILE",
-        "ILENIA TORRE",
-        "DANIELE TROVATO"
-      ]
-    },
-    "FRATELLI D’ITALIA": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "EDUARDO BARCA DETTO EDUARDO",
-        "GIORGIO LEONARDO CATALFAMO",
-        "SALVATORE CHILLEMI",
-        "VERA CUCÉ",
-        "FORTUNATO D’AMICO",
-        "LUIGI SEBASTIANO DALIA",
-        "ERIKA DE FRANCESCO",
-        "GRETA DI NUZZO DETTA DINUZZO",
-        "CARMELO GIUNTA",
-        "CARMELA IMBESI DETTA CARMEN DETTA GUERCIO",
-        "VANESSA CHRISTINE ISGRÒ",
-        "GIAMPIERO LA ROSA DETTO LAROSA",
-        "ANTONINA LEPRO DETTA ANTONELLA",
-        "FRANCESCA TINDARA LO PRESTI",
-        "ALESSANDRA MIRABILE",
-        "CESARE MOLINO",
-        "DAISY FRANCESCA MUNNIA",
-        "ANNA MUSCARA'",
-        "ANGELO PARIDE PINO DETTO PARIDE DETTO ANGELO",
-        "AGOSTINA RECUPERO",
-        "AURORA STINCONE",
-        "CONCETTA SAPORITA",
-        "MARIA GABRIELA TORRE",
-        "EVELYN TINDARA TRAPANI"
-      ]
-    },
-    "NICOLA BARBERA SINDACO": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "SEBASTIANO BAURO",
-        "MICHELE BENGALA",
-        "GIOVANNI BATTISTA BUCALO DETTO TITTA DETTO BUCOLO",
-        "TIZIANO CHIOFALO",
-        "CETTINA CICCIARI",
-        "MARIA CICERO",
-        "DOMENICO GIUNTA",
-        "MARIA GRANATA",
-        "FRANCESCO FAZIO",
-        "GIULIA FLORAMO",
-        "CHIARA ITALIANO",
-        "TINDARA LABOZZETTA DETTA TINA",
-        "SONIA LANZA",
-        "LUCIA MAZZEO",
-        "PATRIZIA ANTONELLA MILONE",
-        "LORENZO MUNAFÒ",
-        "GIUSEPPE OCCELLO",
-        "FRANCESCO PERDICHIZZI",
-        "CARMELO PIRRI",
-        "DANIELA PORCINO",
-        "CARMELO RAVIDA'",
-        "ANTONINO STEFANO SOTTILE",
-        "ANDREANA FRANCESCA SPECIALE",
-        "IRENE STAGNO"
-      ]
-    },
-    "LA CIVICA BARCELLONA P.G.": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "SANDRA ALESCI",
-        "CARMEN ALESCI",
-        "MARIA CARMELA BUCCHERI",
-        "COSIMO CALVO",
-        "PAMELA CAMPO",
-        "ANTONELLA CAPONE",
-        "VINCENZO CATANESI",
-        "MARIA CHILLEMI",
-        "ANTONINA ROSALIA SMERALDA COSTANTINO",
-        "IRENE FAZIO",
-        "GIORGIO FERRARA",
-        "GIANLUCA ANGELO GRASSO",
-        "COSIMO GLIELMI",
-        "GIUSEPPINA LIOTTA",
-        "MARTINA MAIO",
-        "CARMELO MUNAFÒ",
-        "CATERINA PULIAFITO",
-        "ANGELA SALMERI",
-        "LUCIANO SAMUELE SCARPACI",
-        "MARIA SCOLARO",
-        "VELIO ANDREA SPARTA'",
-        "SALVATORE TRASACCO",
-        "MICHELE LETTERIO ZANGLA",
-        "CARMELINA ZARCONE"
-      ]
-    },
-    "FUORI DAL CORO": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "ROBERTO MOLINO",
-        "MICHELE MANDANICI",
-        "ANTONINO TINDARO MANGANO DETTO NINO",
-        "LAURA ANTONELLA ALIBERTI",
-        "ROSA SALVO",
-        "FRANCESCA CALIRI",
-        "FILIPPA SIMONA MAGGISTRO CONTENTA",
-        "WAFAA ZANBIB",
-        "CORRADA SIRACUSA",
-        "CARMELO VIOLA",
-        "SHPRESA SENAJ DETTA SPERANZA",
-        "CATERINA AGRILLO DETTA KATRINE",
-        "FEDERICO DI SALVO",
-        "LUCIA GERBINO DETTA LUCIA PULEJO",
-        "SEBASTIANA CALABRÒ DETTA LILIANA",
-        "TINDARO GRASSO",
-        "GIUSEPPINA SOTTILE",
-        "CATERINA BARTOLONE",
-        "MAURO BRANCIFORTE",
-        "ANDREA GIULIO GIORGIANNI",
-        "ELEONORA MARIA ILACQUA",
-        "MARIA VANESSA SINDONI",
-        "AURORA TORRE",
-        "ROSALIA PAGANO"
-      ]
-    },
-    "ASCOLTIAMO BARCELLONA": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "ENRICO ALFIO BACCARINI",
-        "VITTORIA BERTAMI",
-        "DOMENICO MIRKO BONACETO",
-        "GIUSEPPE CAMBRIA",
-        "MARIA CONTI",
-        "FRANCESCO CORDARO",
-        "CATERINA CHIOFALO",
-        "PROVVIDENZA ANTONINA CHIOFALO",
-        "MARIA TINDARA GULLO",
-        "MYRIAM IUCULANO",
-        "NUNZIO LA MACCHIA",
-        "GIUSEPPE LEMBO",
-        "DOMENICA MILONE",
-        "MICHELE PINO",
-        "LUDOVICA RAFFA",
-        "NATALE TINDARO PARATORE",
-        "CLAUDIO PASCALONE",
-        "LUCA TALAMO"
-      ]
-    },
-    "NOI CI SIAMO": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "MARIA CARMELA ABBATE",
-        "GIOVANNI ALESCI",
-        "SALVATORE BENENATI",
-        "ORNELLA TINDARA CANNATA",
-        "GIUSEPPE CATALANO",
-        "VIVIANNA COPPOLINO",
-        "DORIANA D’AMICO",
-        "MARTIN ELIAS FAZIO",
-        "STEFANO GIORGIANNI",
-        "FRANCESCO GIUNTA",
-        "ARLETA TERESA LIS",
-        "GIUSEPPE MAIO",
-        "MARIA GRAZIA MAZZEO",
-        "SEBASTIANO SALVATORE MIANO",
-        "VINCENZO NANIA",
-        "MARIA OTERA",
-        "DANIELE PICCOLO",
-        "CLELIA PUDDU",
-        "DANIELA SAFFIOTI",
-        "GIUSEPPE ANTONINO SCARPACI",
-        "SALVATORE TORRE",
-        "SALVATORE TRIFILÒ",
-        "MARCO VIOLA"
-      ]
-    },
-    "FORZA ITALIA": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "ALFREDO GIOVANNI ASPA",
-        "LUIGI BAMBACI",
-        "MARIO BARRESI",
-        "ORAZIO BENINATI",
-        "ANTONIO BIONDO",
-        "PAOLA BUCCA",
-        "ANGELA BUCOLO",
-        "CARMELO CALDERONE",
-        "MARIA CARUSO",
-        "TINDARO GIOVINAZZO",
-        "DANIELA IANNELLO",
-        "ANDREANA IMPOLLINO DETTA LILIANA",
-        "MARIKA LAX DETTA CATALFAMO",
-        "SEBASTIANO MIGLIORE",
-        "CARMELA PERDICHIZZI DETTA CARMELINA",
-        "TOMMASO MARIA PINO",
-        "LIDIA PIRRI",
-        "FRANCESCO PULIAFITO",
-        "CARMEN ELENA ROMINU",
-        "DANIELA SCARPACI",
-        "JASMINE SCIACCA",
-        "GIANLUCA SIDOTI",
-        "ELISABETTA SOFIA",
-        "DOMENICO TRIO DETTO MIMMO"
-      ]
-    },
-    "AZZURRI PER BARCELLONA P.G.": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "ALESSANDRO ABBATE",
-        "GIUSEPPE ANTONIO ALIQUÒ",
-        "FABIANA BARTOLOTTA DETTA FABIANA",
-        "GIANFRANCO BENENATI",
-        "GIOVANNI CAMPANELLA",
-        "COSIMA ANNA CARANNA",
-        "FRANCO SALVATORE CARUSO",
-        "GIUSEPPE COPPOLINO",
-        "RICCARDO D’AMICO",
-        "GIOVANNI DE PASQUALE",
-        "ANTONELLA DRAGO FERRANTE",
-        "GRAZIELLA GENOVESE",
-        "LORENZO GITTO",
-        "CATERINA VANESSA GIUNTA",
-        "FERDINANDO GROSSO",
-        "VALERIA ITALIANO",
-        "OKSANA KRAVCHENKO DETTA OXA",
-        "DIEGO LANZA",
-        "LUANA CONCETTA MARCHESE",
-        "ELEONORA MARIA ANTONINA MARZULLO",
-        "SEBASTIANO MAZZEO",
-        "ALESSANDRO MIANO",
-        "YVONNE SAJA",
-        "ANTONINO SCIACCA"
-      ]
-    },
-    "VAMOS! CON BARBERA SINDACO": {
-      "coalition": "NICOLA BARBERA",
-      "candidates": [
-        "GIUSEPPE GIOVANNI ALOSI DETTO PEPPINO",
-        "ANDREA BARRESI",
-        "ROSARIO BILARDO",
-        "MARIA TINDARA BIONDO",
-        "FULVIO LUCA BUCCA",
-        "CARMELO CALDERONE",
-        "SANTINA ELVIRA CAPONE",
-        "NICOLÒ CHILLEMI",
-        "ANTONINO D’AMICO",
-        "GIUSI D’ANGELO",
-        "MARISA DI SALVO",
-        "ANTONINO FAMA'",
-        "ROSARIO INGEGNERI",
-        "FRANCESCO LA ROCCA DETTO FRANCO",
-        "PIETRO MARCHESE",
-        "ANGELA MENDOLIA",
-        "ELIBJONDA METUSHAJ DETTA ELI",
-        "MARIA CARMELA MIANO",
-        "CARMELINA MILONE",
-        "PAOLO PICCOLO",
-        "ANGELA TELLERI",
-        "RITA TORRE",
-        "DENISE TRAVIGLIA",
-        "CARMELA VILLALBA DETTA CARMEN"
-      ]
-    }
-  }
+    "mayors": [],
+    "lists": {}
 }
+
+# Flag di migrazione: svuota una sola volta eventuali dati dimostrativi
+# presenti in una vecchia installazione v64. Dopo l'import reale, il flag
+# resta impostato e i dati amministrativi non vengono più cancellati.
+ANAGRAPHICS_EMPTY_VERSION_KEY = "initial_anagraphics_cleared_v65"
 
 
 def load_election_data_from_settings():
@@ -541,12 +101,41 @@ def election_data_for_user(user):
     return {'mayors': mayors, 'lists': lists}
 
 def _safe_split_votes(value):
+    # Normalizza il campo split_votes_json: può arrivare come lista Python,
+    # stringa JSON o valore mancante. La funzione evita crash lato API.
     if isinstance(value, list):
         return value
     try:
         return json.loads(value or '[]')
     except Exception:
         return []
+
+
+def anagraphics_loaded():
+    """
+    Verifica prerequisito minimo della piattaforma.
+    La webapp consente grafici e inserimento voti solo se l'admin ha caricato
+    almeno un candidato sindaco e almeno una lista con candidati consiglieri.
+    """
+    return bool(ELECTION_DATA.get("mayors")) and bool(ELECTION_DATA.get("lists"))
+
+
+def anagraphics_status_payload():
+    """Payload unico, riusato da frontend e API, per spiegare cosa manca."""
+    lists = ELECTION_DATA.get("lists", {})
+    candidate_count = sum(len(v.get("candidates", [])) for v in lists.values())
+    return {
+        "loaded": anagraphics_loaded(),
+        "mayors_count": len(ELECTION_DATA.get("mayors", [])),
+        "lists_count": len(lists),
+        "candidates_count": candidate_count,
+        "required_order": [
+            "Importazione prioritaria sindaci: Numero Sindaco;Candidato Sindaco",
+            "Importazione prioritaria consiglieri/liste: Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato",
+            "Solo dopo: voti sindaci, voti liste, preferenze, sezioni, grafici e moduli premium"
+        ],
+        "message": "Caricare prima candidati sindaco e consiglieri/lista/coalizione per abilitare inserimento voti, grafici e moduli premium."
+    }
 
 
 MODULE_CATALOG = {
@@ -651,13 +240,25 @@ def init_db():
         "total_electors": "0",
         "total_voters": "0",
         "council_seats": "24",
-        "winner_mayor": "NICOLA BARBERA",
+        "winner_mayor": "",
         "mode": "first",
         "election_data_json": json.dumps(ELECTION_DATA, ensure_ascii=False),
-        "module_config_json": json.dumps(DEFAULT_MODULES, ensure_ascii=False)
+        "module_config_json": json.dumps(DEFAULT_MODULES, ensure_ascii=False),
+        ANAGRAPHICS_EMPTY_VERSION_KEY: "1"
     }
     for key, value in defaults.items():
         cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+
+    # Migrazione v65: se si aggiorna una vecchia installazione con nomi
+    # precompilati, l'anagrafica viene svuotata una sola volta.
+    # In questo modo l'admin è obbligato a caricare i CSV reali prima di
+    # visualizzare grafici o inserire voti.
+    already_cleared = cur.execute("SELECT value FROM settings WHERE key=?", (ANAGRAPHICS_EMPTY_VERSION_KEY,)).fetchone()
+    if not already_cleared:
+        cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('election_data_json', ?)", (json.dumps({"mayors": [], "lists": {}}, ensure_ascii=False),))
+        cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('winner_mayor', '')")
+        cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, '1')", (ANAGRAPHICS_EMPTY_VERSION_KEY,))
+
     cur.execute("SELECT COUNT(*) AS n FROM users")
     if cur.fetchone()["n"] == 0:
         now = datetime.now().isoformat(timespec="seconds")
@@ -725,8 +326,11 @@ def init_db():
 
 @app.before_request
 def ensure_db():
-    if not os.path.exists(DB_PATH):
-        init_db()
+    # Esegue sempre init_db perché la funzione è idempotente:
+    # crea tabelle mancanti, applica migrazioni leggere e non duplica record.
+    # Questo consente agli aggiornamenti dello ZIP di adeguare anche database
+    # già esistenti su Render/VPS senza interventi manuali.
+    init_db()
     load_election_data_from_settings()
 
 def current_user():
@@ -772,7 +376,7 @@ def get_settings(conn):
         "total_electors": int(settings.get("total_electors", "0") or 0),
         "total_voters": int(settings.get("total_voters", "0") or 0),
         "council_seats": int(settings.get("council_seats", "24") or 24),
-        "winner_mayor": settings.get("winner_mayor", "NICOLA BARBERA"),
+        "winner_mayor": settings.get("winner_mayor", ""),
         "mode": settings.get("mode", "first"),
     }
 
@@ -1010,7 +614,15 @@ def config():
     conn = db()
     settings = get_settings(conn)
     conn.close()
-    return jsonify({"ok": True, "data": election_data_for_user(current_user()), "all_data": ELECTION_DATA if current_user()["role"] == "admin" else None, "settings": settings})
+    return jsonify({"ok": True, "data": election_data_for_user(current_user()), "all_data": ELECTION_DATA if current_user()["role"] == "admin" else None, "settings": settings, "anagraphics": anagraphics_status_payload()})
+
+
+@app.get("/api/anagraphics-status")
+@login_required
+def anagraphics_status():
+    # Endpoint leggero usato dalla UX per mostrare cosa deve essere caricato
+    # prima di usare dashboard, inserimento voti e moduli premium.
+    return jsonify({"ok": True, "anagraphics": anagraphics_status_payload()})
 
 
 @app.get("/api/my-report")
@@ -1086,6 +698,8 @@ def save_report():
     list_votes = data.get("list_votes", {})
     preferences = data.get("preferences", {})
     split_votes = _safe_split_votes(data.get("split_votes", []))
+    if not anagraphics_loaded():
+        return jsonify({"ok": False, "error": anagraphics_status_payload()["message"], "anagraphics": anagraphics_status_payload()}), 400
     if not section:
         return jsonify({"ok": False, "error": "Inserire la sezione"}), 400
     if user["role"] != "admin" and user["section"] and section != user["section"]:
@@ -1150,6 +764,8 @@ def close_seat():
     list_votes = data.get("list_votes", {})
     preferences = data.get("preferences", {})
     split_votes = _safe_split_votes(data.get("split_votes", []))
+    if not anagraphics_loaded():
+        return jsonify({"ok": False, "error": anagraphics_status_payload()["message"], "anagraphics": anagraphics_status_payload()}), 400
     if not section:
         return jsonify({"ok": False, "error": "Inserire la sezione"}), 400
     if user["section"] and section != user["section"]:
@@ -1883,6 +1499,24 @@ def _ensure_mayor_votes_for_existing_reports(mayor_names):
     conn.commit()
     conn.close()
 
+
+def _ensure_list_votes_for_existing_reports():
+    """
+    Dopo l'import anagrafico di liste/consiglieri, aggiunge record voto a zero
+    ai report già presenti. Serve quando l'admin crea prima le sezioni e poi
+    carica l'anagrafica definitiva.
+    """
+    conn = db()
+    cur = conn.cursor()
+    rows = cur.execute("SELECT id FROM reports").fetchall()
+    for report in rows:
+        for list_name, obj in ELECTION_DATA.get("lists", {}).items():
+            _upsert_vote(cur, report["id"], "lista", list_name, 0, list_name)
+            for cand in obj.get("candidates", []):
+                _upsert_vote(cur, report["id"], "preferenza", cand, 0, list_name)
+    conn.commit()
+    conn.close()
+
 def _import_votes(kind, by_section):
     try:
         rows = _read_csv_file()
@@ -2053,6 +1687,11 @@ def import_sindaci_priority():
     parsed.sort(key=lambda item: (item[0], item[1]))
     ELECTION_DATA["mayors"] = [name for _, __, name in parsed]
     _save_election_data_to_settings()
+    # Imposta automaticamente il primo sindaco come valore provvisorio per
+    # statistiche/seggi; l'admin può modificarlo in seguito dalle impostazioni.
+    conn_tmp = db()
+    conn_tmp.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('winner_mayor', ?)", (ELECTION_DATA["mayors"][0] if ELECTION_DATA["mayors"] else "",))
+    conn_tmp.commit(); conn_tmp.close()
     _ensure_mayor_votes_for_existing_reports(ELECTION_DATA["mayors"])
 
     return jsonify({
@@ -2062,6 +1701,85 @@ def import_sindaci_priority():
         "errors": errors,
         "message": f"Importazione prioritaria sindaci completata. Candidati sindaco aggiornati: {len(ELECTION_DATA['mayors'])}. Righe saltate: {skipped}."
     })
+
+@app.post("/api/import/consiglieri-priority")
+@admin_required
+def import_consiglieri_priority():
+    """
+    Importazione prioritaria dell'anagrafica liste/coalizioni/consiglieri.
+    Formato CSV obbligatorio:
+    Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato
+
+    Nota: non importa voti. Serve a costruire la base dati elettorale su cui
+    poi lavorano inserimento manuale, grafici e moduli premium.
+    """
+    global ELECTION_DATA
+    try:
+        rows = _read_csv_file(max_rows=10000, preferred_delimiter=";")
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Errore lettura CSV: {str(exc)}"}), 400
+
+    lists = {}
+    skipped = 0
+    errors = []
+
+    for idx, row in enumerate(rows, start=1):
+        try:
+            if len(row) < 5:
+                raise ValueError("formato richiesto: Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato")
+            list_number = str(row[0]).strip()
+            list_name = str(row[1]).strip().upper()
+            coalition_raw = str(row[2]).strip().upper()
+            candidate_number = str(row[3]).strip()
+            candidate_name = str(row[4]).strip().upper()
+            if not list_name or not coalition_raw or not candidate_name:
+                raise ValueError("Nome Lista, Coalizione e Nome Candidato sono obbligatori")
+
+            # Normalizza la coalizione sul nome del candidato sindaco, se già
+            # presente nell'anagrafica sindaci; altrimenti conserva il testo CSV.
+            coalition = _resolve_mayor(coalition_raw) or coalition_raw
+
+            if list_name not in lists:
+                lists[list_name] = {"number": list_number, "coalition": coalition, "candidates": [], "_seen": set()}
+
+            norm_cand = _norm(candidate_name)
+            if norm_cand in lists[list_name]["_seen"]:
+                skipped += 1
+                continue
+            lists[list_name]["_seen"].add(norm_cand)
+            try:
+                order = int(candidate_number)
+            except Exception:
+                order = 999999 + idx
+            lists[list_name]["candidates"].append((order, idx, candidate_name))
+        except Exception as exc:
+            skipped += 1
+            if len(errors) < 50:
+                errors.append(f"Riga {idx}: {str(exc)}")
+
+    if not lists:
+        return jsonify({"ok": False, "error": "Nessuna lista/candidato consigliere valido trovato nel CSV", "errors": errors}), 400
+
+    clean_lists = {}
+    for list_name, obj in lists.items():
+        ordered_candidates = [name for _, __, name in sorted(obj["candidates"], key=lambda x: (x[0], x[1]))]
+        clean_lists[list_name] = {"coalition": obj["coalition"], "candidates": ordered_candidates}
+
+    ELECTION_DATA["lists"] = clean_lists
+    _save_election_data_to_settings()
+    _ensure_list_votes_for_existing_reports()
+
+    return jsonify({
+        "ok": True,
+        "imported": sum(len(v["candidates"]) for v in clean_lists.values()),
+        "lists": len(clean_lists),
+        "skipped": skipped,
+        "errors": errors,
+        "message": f"Importazione prioritaria consiglieri/liste completata. Liste: {len(clean_lists)}. Candidati: {sum(len(v['candidates']) for v in clean_lists.values())}. Righe saltate: {skipped}."
+    })
+
 
 @app.post("/api/import/liste")
 @admin_required
