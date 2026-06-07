@@ -8,7 +8,11 @@ let mayorPieChart=null,listPieChart=null,listBarChart=null,lastData=null;
 let detailCharts=[];
 let currentPrefTableList=null;
 let electionListNames=[];
-const DETAIL_LISTS=["PARTITO DEMOCRATICO","MOVIMENTO 5STELLE","CITTA' APERTA - CONTROCORRENTE"];
+// Le tab dei grafici e delle tabelle non sono più limitate a poche liste predefinite.
+// Vengono generate dinamicamente da tutte le liste presenti nelle anagrafiche/caricamenti CSV.
+function getAllListNamesFromDashboard(d){
+  return Object.keys(d?.data?.lists || {}).sort((a,b)=>a.localeCompare(b));
+}
 
 function hasEl(id){ return document.getElementById(id)!==null; }
 function safeEl(id){ return document.getElementById(id); }
@@ -184,7 +188,9 @@ function renderSections(d){
 }
 
 
-function availableDetailLists(d){ return DETAIL_LISTS.filter(l=>d.data.lists[l]); }
+function availableDetailLists(d){
+  return getAllListNamesFromDashboard(d);
+}
 
 function renderPrefTableTabs(d){
   const tabs=document.getElementById("prefTableTabs");
@@ -192,6 +198,11 @@ function renderPrefTableTabs(d){
   if(!tabs || !box) return;
   tabs.innerHTML="";
   const available=availableDetailLists(d);
+  if(!available.length){
+    tabs.innerHTML="<p class='small'>Nessuna lista caricata. Importare prima liste e candidati consiglieri.</p>";
+    box.innerHTML="";
+    return;
+  }
   if(!currentPrefTableList || !available.includes(currentPrefTableList)) currentPrefTableList=available[0];
 
   available.forEach(listName=>{
@@ -259,12 +270,14 @@ async function renderDetailCharts(){
   destroyDetailCharts();
   const listsBox=document.getElementById("chartTabLists");
   const prefsBox=document.getElementById("chartTabPrefs");
-  listsBox.innerHTML=""; prefsBox.innerHTML="";
+  if(listsBox) listsBox.innerHTML="";
+  if(prefsBox) prefsBox.innerHTML="";
   const d=await api("/api/section-details");
   const sections=Object.keys(d.sections).sort((a,b)=>(parseInt(a)||0)-(parseInt(b)||0) || a.localeCompare(b));
-  if(sections.length===0){ listsBox.innerHTML="<p class='small'>Nessun dato.</p>"; prefsBox.innerHTML="<p class='small'>Nessun dato.</p>"; return; }
-
   const available=availableDetailLists(d);
+  if(sections.length===0){ if(listsBox) listsBox.innerHTML="<p class='small'>Nessun dato di sezione.</p>"; if(prefsBox) prefsBox.innerHTML="<p class='small'>Nessun dato di sezione.</p>"; return; }
+  if(!available.length){ if(listsBox) listsBox.innerHTML="<p class='small'>Nessuna lista caricata.</p>"; if(prefsBox) prefsBox.innerHTML="<p class='small'>Nessun candidato caricato.</p>"; return; }
+
 
   const listTabBar=document.createElement("div"), listContent=document.createElement("div");
   listTabBar.className="tabs"; listsBox.append(listTabBar,listContent);
