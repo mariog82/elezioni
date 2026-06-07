@@ -2,6 +2,7 @@
 let mayorPieChart=null,listPieChart=null,listBarChart=null,lastData=null;
 let detailCharts=[];
 let currentPrefTableList=null;
+let electionListNames=[];
 const DETAIL_LISTS=["PARTITO DEMOCRATICO","MOVIMENTO 5STELLE","CITTA' APERTA - CONTROCORRENTE"];
 
 function hasEl(id){ return document.getElementById(id)!==null; }
@@ -301,6 +302,8 @@ async function loadUsers(){
   if(!hasEl("users")) return;
   const d=await api("/api/users");
   usersCache=d.users || [];
+  electionListNames=d.lists || [];
+  renderNewUserListChecks();
   const box=document.getElementById("users");
   box.innerHTML="";
 
@@ -337,6 +340,26 @@ function escapeAttr(value){
   return String(value ?? "").replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 }
 
+
+function splitAllowedListsText(value){
+  return String(value||"").split("|").map(x=>x.trim()).filter(Boolean);
+}
+function renderListPermissionChecks(containerId, inputId, selected=[]){
+  const box=document.getElementById(containerId);
+  const input=document.getElementById(inputId);
+  if(!box || !input) return;
+  const selectedSet=new Set(selected);
+  if(!electionListNames.length){
+    box.innerHTML='<p class="small warn">Carica prima le liste da Importazioni CSV per poterle assegnare ai rilevatori.</p>';
+    return;
+  }
+  box.innerHTML=electionListNames.map((name,i)=>`<label class="checkItem"><input type="checkbox" value="${escapeAttr(name)}" ${selectedSet.has(name)?'checked':''}> ${escapeHtml(name)}</label>`).join("");
+  const sync=()=>{ input.value=Array.from(box.querySelectorAll('input[type="checkbox"]:checked')).map(x=>x.value).join('|'); };
+  box.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.addEventListener('change', sync));
+  input.addEventListener('input', ()=>renderListPermissionChecks(containerId,inputId,splitAllowedListsText(input.value)), {once:true});
+}
+function renderNewUserListChecks(){ renderListPermissionChecks('newAllowedListsChecks','newAllowedLists', splitAllowedListsText(document.getElementById('newAllowedLists')?.value)); }
+
 function openEditUserPopup(id){
   const u=usersCache.find(x=>x.id===id);
   if(!u){ alert("Utente non trovato."); return; }
@@ -346,6 +369,8 @@ function openEditUserPopup(id){
   document.getElementById("editUserSection").value=u.section || "";
   document.getElementById("editUserRole").value=u.role || "rappresentante";
   document.getElementById("editUserPin").value="";
+  if(document.getElementById("editUserAllowedLists")) document.getElementById("editUserAllowedLists").value=u.allowed_lists||"";
+  renderListPermissionChecks("editAllowedListsChecks","editUserAllowedLists", splitAllowedListsText(u.allowed_lists));
   document.getElementById("editUserModal").classList.remove("hidden");
 }
 
@@ -360,7 +385,8 @@ async function saveEditUserPopup(){
     phone:document.getElementById("editUserPhone").value.trim(),
     section:document.getElementById("editUserSection").value.trim(),
     role:document.getElementById("editUserRole").value,
-    pin:document.getElementById("editUserPin").value.trim()
+    pin:document.getElementById("editUserPin").value.trim(),
+    allowed_lists: splitAllowedListsText(document.getElementById("editUserAllowedLists")?.value)
   };
   if(!payload.name || !payload.phone){
     alert("Nome e telefono/codice sono obbligatori.");

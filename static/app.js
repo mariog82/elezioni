@@ -65,17 +65,17 @@ async function start(){
 async function login(){
   try{const d=await api("/api/login",{method:"POST",body:JSON.stringify({phone:phone.value.trim(),pin:pin.value.trim()})});user=d.user;await showApp()}catch(e){alert(e.message)}
 }
-async function logout(){await api("/api/logout",{method:"POST",body:"{}"});location.href="/"}
+async function logout(){try{await api("/api/logout",{method:"POST",body:"{}"});}catch(e){} location.href="/logout"}
 async function logoutClosed(){await logout()}
 
 async function showApp(){
   loginBox.classList.add("hidden"); appBox.classList.remove("hidden");
   userName.textContent=user.name;
   userInfo.textContent=`Ruolo: ${user.role} - Sezione: ${user.section||"tutte"} - Liste autorizzate: ${(user.allowed_lists||[]).length?(user.allowed_lists||[]).join(", "):"tutte"}`;
-  if(isAdmin()) adminBtn.classList.remove("hidden");
+  if(isAdmin()){ document.getElementById("adminBtn")?.classList.remove("hidden"); document.getElementById("topAdminLink")?.classList.remove("hidden"); }
   const cfg=await api("/api/config"); DATA=cfg.data; settings=cfg.settings; anagraphics=cfg.anagraphics;
   if(!anagraphics?.loaded){ showMissingAnagraphics(); return; }
-  initState(); renderAll(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
+  initState(); renderAll(); renderAnagraphicsOverview(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
 }
 function showMissingAnagraphics(){
   const app=document.getElementById("appBox");
@@ -116,7 +116,19 @@ async function loadExisting(){
   if(d.updated_at) lastUpdate.textContent=d.updated_at;
   renderAll(); setSaveStatus("Dati caricati dal server", "okpill");
 }
-function renderAll(){ renderMayors(); renderTabs(); renderListPanel(); renderSplitVotes(); }
+
+function renderAnagraphicsOverview(){
+  const box=document.getElementById("anagraphicsOverview");
+  if(!box || !DATA) return;
+  const mayors=(DATA.mayors||[]).map(m=>`<span class="badge">${esc(m)}</span>`).join(" ") || "<span class='small'>Nessun sindaco caricato.</span>";
+  const lists=Object.entries(DATA.lists||{}).map(([lname,obj])=>{
+    const candidates=(obj.candidates||[]).map(c=>`<li>${esc(c)}</li>`).join("");
+    return `<details class="listDetails"><summary><b>${esc(lname)}</b> <span class="small">Coalizione/Sindaco: ${esc(obj.coalition||'—')} · ${(obj.candidates||[]).length} candidati</span></summary><ol>${candidates}</ol></details>`;
+  }).join("") || "<p class='small'>Nessuna lista caricata.</p>";
+  box.innerHTML=`<div class="overviewBlock"><h3>Candidati sindaco</h3><div class="badgeWrap">${mayors}</div></div><div class="overviewBlock"><h3>Liste e consiglieri</h3>${lists}</div>`;
+}
+
+function renderAll(){ renderMayors(); renderTabs(); renderListPanel(); renderSplitVotes(); renderAnagraphicsOverview(); }
 function renderMayors(){
   const box=mayorList; box.innerHTML="";
   DATA.mayors.forEach(m=>box.appendChild(voteRow(m,"mayor",null)));
