@@ -91,7 +91,7 @@ def _allowed_lists_from_user(user):
     return [x.strip() for x in raw.split('|') if x.strip()]
 
 def election_data_for_user(user):
-    if not user or user['role'] == 'admin':
+    if not user or str(user['role']).lower() == 'admin':
         return ELECTION_DATA
     allowed = _allowed_lists_from_user(user)
     if not allowed:
@@ -364,7 +364,7 @@ def admin_required(fn):
         user = current_user()
         if not user:
             return jsonify({"ok": False, "error": "Accesso non autorizzato"}), 401
-        if user["role"] != "admin":
+        if str(user["role"]).lower() != "admin":
             return jsonify({"ok": False, "error": "Funzione riservata all'amministratore"}), 403
         return fn(*args, **kwargs)
     return wrapper
@@ -454,7 +454,7 @@ def login_page():
     # Prima schermata: accesso guidato. Se già autenticato porta l'utente alla propria area.
     user = current_user()
     if user:
-        return redirect("/admin" if user["role"] == "admin" else "/app")
+        return redirect("/admin" if str(user["role"]).lower() == "admin" else "/app")
     return send_from_directory(STATIC_DIR, "login.html")
 
 @app.route("/app")
@@ -468,7 +468,7 @@ def admin_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin.html")
 
@@ -478,7 +478,7 @@ def admin_charts_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_charts.html")
 
@@ -487,7 +487,7 @@ def admin_imports_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_imports.html")
 
@@ -496,7 +496,7 @@ def admin_users_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_users.html")
 
@@ -506,7 +506,7 @@ def admin_tools_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_tools.html")
 
@@ -515,7 +515,7 @@ def admin_modules_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_modules.html")
 
@@ -524,7 +524,7 @@ def admin_blockchain_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     if not module_enabled("blockchain"):
         return redirect("/admin/modules")
@@ -535,7 +535,7 @@ def admin_osint_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     if not module_enabled("osint"):
         return redirect("/admin/modules")
@@ -546,7 +546,7 @@ def admin_simulator_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     if not module_enabled("simulator"):
         return redirect("/admin/modules")
@@ -557,7 +557,7 @@ def admin_intelligence_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     if not module_enabled("intelligence"):
         return redirect("/admin/modules")
@@ -568,7 +568,7 @@ def admin_social_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if user["role"] != "admin":
+    if str(user["role"]).lower() != "admin":
         return redirect("/app")
     if not module_enabled("social"):
         return redirect("/admin/modules")
@@ -621,7 +621,7 @@ def config():
     conn = db()
     settings = get_settings(conn)
     conn.close()
-    return jsonify({"ok": True, "data": election_data_for_user(current_user()), "all_data": ELECTION_DATA if current_user()["role"] == "admin" else None, "settings": settings, "anagraphics": anagraphics_status_payload()})
+    return jsonify({"ok": True, "data": election_data_for_user(current_user()), "all_data": ELECTION_DATA if str(current_user()["role"]).lower() == "admin" else None, "settings": settings, "anagraphics": anagraphics_status_payload()})
 
 
 @app.get("/api/anagraphics-status")
