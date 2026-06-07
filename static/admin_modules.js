@@ -1,0 +1,7 @@
+let MODULES=[];
+async function api(url,opts){const r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json'},...(opts||{})});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error||'Errore server');return d}
+function esc(s){return String(s??'').replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[m]))}
+async function loadModules(){const d=await api('/api/modules'); MODULES=d.modules; renderModules();}
+function renderModules(){moduleGrid.innerHTML=MODULES.map(m=>`<div class="moduleCard ${m.enabled?'on':'off'}"><div class="moduleTop"><span class="badge">${esc(m.area)}</span><label class="switch"><input type="checkbox" data-key="${esc(m.key)}" ${m.enabled?'checked':''}><span></span></label></div><h3>${esc(m.title)}</h3><p>${esc(m.description)}</p><button class="secondary" onclick="location.href='${esc(m.path)}'" ${m.enabled?'':'disabled'}>Apri modulo</button></div>`).join(''); moduleLinks.innerHTML=MODULES.filter(m=>m.enabled).map(m=>`<button onclick="location.href='${esc(m.path)}'">${esc(m.title)}</button>`).join('')||'<p>Nessun modulo attivo.</p>';}
+async function saveModules(){const cfg={}; document.querySelectorAll('input[data-key]').forEach(i=>cfg[i.dataset.key]=i.checked); await api('/api/modules',{method:'POST',body:JSON.stringify({modules:cfg})}); await loadModules(); alert('Moduli aggiornati');}
+loadModules().catch(e=>alert(e.message));
