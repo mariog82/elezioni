@@ -12,7 +12,7 @@ const enc=s=>btoa(unescape(encodeURIComponent(s))).replace(/=/g,'').replace(/\+/
 const nval=id=>Math.max(0,parseInt(document.getElementById(id)?.value||"0",10)||0);
 const sum=o=>Object.values(o||{}).reduce((a,b)=>a+(parseInt(b||0,10)||0),0);
 const esc=s=>String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
-function isAdmin(){return user && user.role==="admin";}
+function isAdmin(){return user && String(user.role||"").toLowerCase()==="admin";}
 function allowedListNames(){ return Object.keys(DATA?.lists||{}); }
 
 function buildPayload(){
@@ -65,14 +65,19 @@ async function start(){
 async function login(){
   try{const d=await api("/api/login",{method:"POST",body:JSON.stringify({phone:phone.value.trim(),pin:pin.value.trim()})});user=d.user;await showApp()}catch(e){alert(e.message)}
 }
-async function logout(){try{await api("/api/logout",{method:"POST",body:"{}"});}catch(e){} location.href="/logout"}
+async function logout(){try{await api("/api/logout",{method:"POST",body:"{}"});}catch(e){} location.href="/"}
 async function logoutClosed(){await logout()}
 
 async function showApp(){
   loginBox.classList.add("hidden"); appBox.classList.remove("hidden");
   userName.textContent=user.name;
   userInfo.textContent=`Ruolo: ${user.role} - Sezione: ${user.section||"tutte"} - Liste autorizzate: ${(user.allowed_lists||[]).length?(user.allowed_lists||[]).join(", "):"tutte"}`;
-  if(isAdmin()){ document.getElementById("adminBtn")?.classList.remove("hidden"); document.getElementById("topAdminLink")?.classList.remove("hidden"); }
+  if(isAdmin()){
+    const adminBtn=document.getElementById("adminBtn");
+    const topAdminLink=document.getElementById("topAdminLink");
+    if(adminBtn){adminBtn.classList.remove("hidden"); adminBtn.textContent="Torna al pannello Admin";}
+    if(topAdminLink){topAdminLink.classList.remove("hidden"); topAdminLink.textContent="Pannello Admin";}
+  }
   const cfg=await api("/api/config"); DATA=cfg.data; settings=cfg.settings; anagraphics=cfg.anagraphics;
   if(!anagraphics?.loaded){ showMissingAnagraphics(); return; }
   initState(); renderAll(); renderAnagraphicsOverview(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
@@ -123,7 +128,7 @@ function renderAnagraphicsOverview(){
   const mayors=(DATA.mayors||[]).map(m=>`<span class="badge">${esc(m)}</span>`).join(" ") || "<span class='small'>Nessun sindaco caricato.</span>";
   const lists=Object.entries(DATA.lists||{}).map(([lname,obj])=>{
     const candidates=(obj.candidates||[]).map(c=>`<li>${esc(c)}</li>`).join("");
-    return `<details class="listDetails"><summary><b>${esc(lname)}</b> <span class="small">Coalizione/Sindaco: ${esc(obj.coalition||'—')} · ${(obj.candidates||[]).length} candidati</span></summary><ol>${candidates}</ol></details>`;
+    return `<details class="listDetails" open><summary><b>${esc(lname)}</b> <span class="small">Numero lista: ${esc(obj.number||'—')} · Coalizione/Sindaco: ${esc(obj.coalition||'—')} · ${(obj.candidates||[]).length} candidati</span></summary><ol>${candidates}</ol></details>`;
   }).join("") || "<p class='small'>Nessuna lista caricata.</p>";
   box.innerHTML=`<div class="overviewBlock"><h3>Candidati sindaco</h3><div class="badgeWrap">${mayors}</div></div><div class="overviewBlock"><h3>Liste e consiglieri</h3>${lists}</div>`;
 }
