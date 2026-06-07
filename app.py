@@ -600,8 +600,15 @@ def login():
 
 @app.post("/api/logout")
 def logout():
+    # Logout usato dalle chiamate JavaScript: pulisce interamente la sessione Flask.
     session.clear()
     return jsonify({"ok": True})
+
+@app.get("/logout")
+def logout_page():
+    # Logout di sicurezza usabile anche come semplice link HTML.
+    session.clear()
+    return redirect("/")
 
 @app.get("/api/me")
 @login_required
@@ -1148,7 +1155,13 @@ def users():
     conn = db()
     rows = conn.execute("SELECT id, name, phone, role, section, allowed_lists, qr_token, active FROM users ORDER BY id").fetchall()
     conn.close()
-    return jsonify({"ok": True, "users": [dict(row) for row in rows]})
+    # Ritorna anche l'elenco delle liste caricate: serve al pannello admin
+    # per abilitare rapidamente le liste su cui ogni rilevatore può inserire voti.
+    return jsonify({
+        "ok": True,
+        "users": [dict(row) for row in rows],
+        "lists": sorted(list(ELECTION_DATA.get("lists", {}).keys()))
+    })
 
 @app.post("/api/users")
 @admin_required
