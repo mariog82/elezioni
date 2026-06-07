@@ -1,3 +1,10 @@
+/*
+Modulo Blockchain Electoral Audit / DAO / NFT
+- chiama /api/blockchain per ottenere la catena locale dimostrativa;
+- mostra hash SHA-256 per ogni sezione;
+- presenta casi d'uso DAO e badge/NFT elettorali;
+- in produzione il payload prodotto dal backend va ancorato su una chain reale.
+*/
 async function api(url){const r=await fetch(url,{credentials:'include'});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error||'Errore server');return d}function esc(s){return String(s??'').replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[m]))}function kpi(l,v,s=''){return `<div class="card kpi"><b>${esc(v)}</b><span>${esc(l)}</span><small>${esc(s)}</small></div>`}
 async function loadBlockchain(){const d=await api('/api/blockchain'); bcSummary.innerHTML=[kpi('Blocchi audit',d.chain.length),kpi('Ultimo hash',d.last_hash.slice(0,12)+'…'),kpi('NFT/Badge',d.nft_badges.length),kpi('DAO',d.dao.enabled?'attiva':'non attiva')].join(''); chainBox.innerHTML=`<table><tr><th>#</th><th>Sezione</th><th>Rappresentante</th><th>Data hash</th><th>Previous</th><th>Block hash</th><th>Stato</th></tr>${d.chain.map(b=>`<tr><td>${b.index}</td><td>${esc(b.section)}</td><td>${esc(b.representative||'—')}</td><td><code>${b.data_hash.slice(0,18)}…</code></td><td><code>${esc(b.previous_hash).slice(0,18)}…</code></td><td><code>${b.block_hash.slice(0,18)}…</code></td><td><span class="badge">${esc(b.status)}</span></td></tr>`).join('')}</table>`; daoBox.innerHTML=`<div class="card"><h3>Governance</h3><p>${esc(d.dao.governance)}</p></div><div class="card"><h3>Ruoli</h3><div class="pillList">${d.dao.roles.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div></div><div class="card"><h3>Proposte</h3><div class="pillList">${d.dao.proposal_types.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div></div>`; nftBox.innerHTML=d.nft_badges.map((n,i)=>`<div class="scoreCard"><span class="rank">NFT ${i+1}</span><h3>${esc(n.name)}</h3><p><b>Trigger:</b> ${esc(n.trigger)}</p><p><b>Utility:</b> ${esc(n.utility)}</p></div>`).join('');}
 loadBlockchain().catch(e=>alert(e.message));

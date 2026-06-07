@@ -1,3 +1,9 @@
+/*
+Gestione moduli premium
+- permette all'admin di attivare/disattivare moduli indipendenti;
+- il backend verifica l'abilitazione prima di servire le API premium;
+- consente vendita modulare SaaS: base, premium, blockchain, OSINT, simulator.
+*/
 let MODULES=[];
 async function api(url,opts){const r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json'},...(opts||{})});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error||'Errore server');return d}
 function esc(s){return String(s??'').replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[m]))}

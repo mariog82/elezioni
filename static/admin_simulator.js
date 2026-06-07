@@ -1,3 +1,9 @@
+/*
+Modulo Simulatore elettorale
+- invia scenari a /api/simulator;
+- modifica affluenza e swing su sindaci/liste;
+- restituisce proiezioni esplorative per valutare scenari politici alternativi.
+*/
 let mc,lc;async function api(url,body){const r=await fetch(url,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error||'Errore server');return d}function esc(s){return String(s??'').replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[m]))}function destroy(c){if(c)c.destroy()}
 async function runSimulation(){const d=await api('/api/simulator',{turnout_delta:turnoutDelta.value,mayor_swing:mayorSwing.value,target_mayor:targetMayor.value,list_swing:listSwing.value,target_list:targetList.value}); simNote.textContent=d.note; destroy(mc); destroy(lc); mc=new Chart(mayorChart,{type:'bar',data:{labels:d.mayors.map(x=>x.name),datasets:[{label:'Sindaci simulati',data:d.mayors.map(x=>x.simulated)}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}}); lc=new Chart(listChart,{type:'bar',data:{labels:d.lists.slice(0,12).map(x=>x.name),datasets:[{label:'Liste simulate',data:d.lists.slice(0,12).map(x=>x.simulated)}]},options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{autoSkip:false,maxRotation:70,minRotation:30}},y:{beginAtZero:true}}}}); simTables.innerHTML=`<h3>Sindaci</h3><table><tr><th>#</th><th>Sindaco</th><th>Base</th><th>Simulato</th></tr>${d.mayors.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.name)}</td><td>${x.projected}</td><td><b>${x.simulated}</b></td></tr>`).join('')}</table><h3>Liste</h3><table><tr><th>#</th><th>Lista</th><th>Base</th><th>Simulato</th></tr>${d.lists.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.name)}</td><td>${x.projected}</td><td><b>${x.simulated}</b></td></tr>`).join('')}</table>`;}
 runSimulation().catch(e=>alert(e.message));

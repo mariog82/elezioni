@@ -1,3 +1,9 @@
+/*
+Political Intelligence Platform
+- consuma /api/intelligence;
+- visualizza heatmap, reti/body politico, predizione AI-like e peso politico reale;
+- per modelli AI reali sostituire le euristiche backend con pipeline ML addestrate su storico elettorale.
+*/
 let INTEL=null, predMayorChart=null, predListChart=null;
 async function api(url){const r=await fetch(url,{credentials:'include'});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error||'Errore server');return d}
 function esc(s){return String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}

@@ -1,3 +1,9 @@
+/*
+Modulo Social & Viral
+- genera card condivisibili, dashboard pubbliche e Political Score;
+- usa solo dati aggregati e non dati personali dei rappresentanti;
+- pensato per crescita virale, comunicazione del candidato/lista e monetizzazione premium.
+*/
 let SOCIAL=null;
 async function api(url){const r=await fetch(url,{credentials:'include'});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error||'Errore server');return d}
 function esc(s){return String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}

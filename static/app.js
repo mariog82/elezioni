@@ -1,4 +1,4 @@
-let user=null, DATA=null, settings=null, currentList=null;
+let user=null, DATA=null, settings=null, currentList=null, anagraphics=null;
 let mayorVotes={}, listVotes={}, prefs={}, splitVotes=[];
 let autosaveTimer=null, autosaveBusy=false, lastSavedPayload="";
 
@@ -73,9 +73,17 @@ async function showApp(){
   userName.textContent=user.name;
   userInfo.textContent=`Ruolo: ${user.role} - Sezione: ${user.section||"tutte"} - Liste autorizzate: ${(user.allowed_lists||[]).length?(user.allowed_lists||[]).join(", "):"tutte"}`;
   if(isAdmin()) adminBtn.classList.remove("hidden");
-  const cfg=await api("/api/config"); DATA=cfg.data; settings=cfg.settings;
+  const cfg=await api("/api/config"); DATA=cfg.data; settings=cfg.settings; anagraphics=cfg.anagraphics;
+  if(!anagraphics?.loaded){ showMissingAnagraphics(); return; }
   initState(); renderAll(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
 }
+function showMissingAnagraphics(){
+  const app=document.getElementById("appBox");
+  const msg=anagraphics?.message || "Caricare prima candidati sindaco e liste/consiglieri.";
+  const steps=(anagraphics?.required_order||[]).map(x=>`<li>${esc(x)}</li>`).join("");
+  app.innerHTML=`<div class="card warningCard"><h2>Configurazione elettorale obbligatoria</h2><p>${esc(msg)}</p><ul>${steps}</ul><p><b>Stato attuale:</b> ${anagraphics?.mayors_count||0} sindaci, ${anagraphics?.lists_count||0} liste, ${anagraphics?.candidates_count||0} candidati consiglieri.</p>${isAdmin()?'<a class="btn primary" href="/admin/imports">Vai alle importazioni CSV</a>':'<p>Contattare l'amministratore della piattaforma.</p>'}</div>`;
+}
+
 function initState(){
   mayorVotes={}; listVotes={}; prefs={};
   DATA.mayors.forEach(m=>mayorVotes[m]=0);

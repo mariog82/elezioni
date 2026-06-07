@@ -9,6 +9,7 @@
 <body>
 <header><h1>Importazione</h1><div>Importazioni CSV</div></header>
 <main>
+<section class="card warn"><h2>Ordine obbligatorio di configurazione</h2><p>La piattaforma parte senza sindaci, liste e candidati. Per abilitare inserimento voti, grafici e moduli premium caricare prima <b>sindaci</b> e poi <b>liste/coalizioni/consiglieri</b>. Solo dopo importare voti e sezioni.</p></section>
 
 <section class="card priority-import">
   <h2>Importazioni prioritarie</h2>
@@ -35,12 +36,12 @@
       <h3>Importazione prioritaria consiglieri</h3>
       <p class="small">
         Formato obbligatorio:<br>
-        <b>Numero Lista;Nome Lista;Numero Candidato;Nome Candidato;Voti validi</b>
+        <b>Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato</b>
       </p>
       <input type="file" id="csv_priority_consiglieri" accept=".csv,text/csv">
       <button class="primary"
-        onclick="importGenericCsv('csv_priority_consiglieri','/api/import/consiglieri')">
-        Importa consiglieri
+        onclick="importGenericCsv('csv_priority_consiglieri','/api/import/consiglieri-priority')">
+        Importa liste/coalizioni/consiglieri
       </button>
     </div>
   </div>
