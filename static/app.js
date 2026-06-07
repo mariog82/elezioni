@@ -3,7 +3,8 @@ let mayorVotes={}, listVotes={}, prefs={}, splitVotes=[];
 let autosaveTimer=null, autosaveBusy=false, lastSavedPayload="";
 
 async function api(url, options={}){
-  const res=await fetch(url,{credentials:"include",headers:{"Content-Type":"application/json"},...options});
+  const finalUrl = (!options.method || String(options.method).toUpperCase()==="GET") ? url + (url.includes("?") ? "&" : "?") + "_=" + Date.now() : url;
+  const res=await fetch(finalUrl,{credentials:"include",headers:{"Content-Type":"application/json"},...options});
   const data=await res.json();
   if(!res.ok||data.ok===false) throw new Error(data.error||"Errore server");
   return data;
@@ -14,6 +15,25 @@ const sum=o=>Object.values(o||{}).reduce((a,b)=>a+(parseInt(b||0,10)||0),0);
 const esc=s=>String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 function isAdmin(){return user && String(user.role||"").toLowerCase()==="admin";}
 function allowedListNames(){ return Object.keys(DATA?.lists||{}); }
+
+function normalizeElectionData(raw){
+  // Normalizza i dati elettorali caricati dall'admin.
+  // Serve a valorizzare sempre tabelle e combobox anche se il backend
+  // restituisce dati con numeri/lista o campi parziali.
+  const src = raw || {mayors:[], lists:{}};
+  const mayors = Array.isArray(src.mayors) ? src.mayors.filter(Boolean).map(x=>String(x)) : Object.keys(src.mayors||{});
+  const lists = {};
+  Object.entries(src.lists || {}).forEach(([name,obj])=>{
+    const o = obj || {};
+    const candidates = Array.isArray(o.candidates) ? o.candidates.filter(Boolean).map(x=>String(x)) : [];
+    lists[String(name)] = {
+      number: o.number || o.numero || o["Numero Lista"] || "",
+      coalition: o.coalition || o.sindaco || o.coalizione || "",
+      candidates
+    };
+  });
+  return {mayors, lists};
+}
 
 function buildPayload(){
   return {
@@ -73,21 +93,17 @@ async function showApp(){
   userName.textContent=user.name;
   userInfo.textContent=`Ruolo: ${user.role} - Sezione: ${user.section||"tutte"} - Liste autorizzate: ${(user.allowed_lists||[]).length?(user.allowed_lists||[]).join(", "):"tutte"}`;
   if(isAdmin()){
+    // Il pulsante di ritorno al pannello amministratore deve comparire
+    // nel box laterale PI, esattamente sotto “Dashboard pubblica”.
     const adminBtn=document.getElementById("adminBtn");
-    const topAdminLink=document.getElementById("topAdminLink");
     if(adminBtn){
       adminBtn.classList.remove("hidden");
       adminBtn.style.display="block";
       adminBtn.textContent="Torna al pannello amministratore";
     }
-    if(topAdminLink){
-      topAdminLink.classList.remove("hidden");
-      topAdminLink.style.display="inline-flex";
-      topAdminLink.textContent="Pannello amministratore";
-    }
   }
   const cfg=await api("/api/config");
-  DATA = (isAdmin() && cfg.all_data) ? cfg.all_data : cfg.data;
+  DATA = normalizeElectionData((isAdmin() && cfg.all_data) ? cfg.all_data : cfg.data);
   settings=cfg.settings; anagraphics=cfg.anagraphics;
   if(!anagraphics?.loaded){ showMissingAnagraphics(); return; }
   initState(); renderAll(); bindInputs(); lockRepresentativeSection(); await loadExisting(); await checkClosedStatus(); updateValidationBox();
@@ -96,7 +112,8 @@ function showMissingAnagraphics(){
   const app=document.getElementById("appBox");
   const msg=anagraphics?.message || "Caricare prima candidati sindaco e liste/consiglieri.";
   const steps=(anagraphics?.required_order||[]).map(x=>`<li>${esc(x)}</li>`).join("");
-  app.innerHTML=`<div class="card warningCard"><h2>Configurazione elettorale obbligatoria</h2><p>${esc(msg)}</p><ul>${steps}</ul><p><b>Stato attuale:</b> ${anagraphics?.mayors_count||0} sindaci, ${anagraphics?.lists_count||0} liste, ${anagraphics?.candidates_count||0} candidati consiglieri.</p>${isAdmin()?'<a class="btn primary" href="/admin/imports">Vai alle importazioni CSV</a>':'<p>Contattare l'amministratore della piattaforma.</p>'}</div>`;
+  const importLink = isAdmin() ? `<a class="btn primary" href="/admin/imports">Vai alle importazioni CSV</a>` : `<p>Contattare l'amministratore della piattaforma.</p>`;
+  app.innerHTML=`<div class="card warningCard"><h2>Configurazione elettorale obbligatoria</h2><p>${esc(msg)}</p><ul>${steps}</ul><p><b>Stato attuale:</b> ${anagraphics?.mayors_count||0} sindaci, ${anagraphics?.lists_count||0} liste, ${anagraphics?.candidates_count||0} candidati consiglieri.</p>${importLink}</div>`;
 }
 
 function initState(){
@@ -156,7 +173,15 @@ function renderMayors(){
     box.innerHTML="<p class='small warnText'>Nessun candidato sindaco presente. Caricare il CSV sindaci dal pannello amministratore.</p>";
     return;
   }
-  DATA.mayors.forEach(m=>box.appendChild(voteRow(m,"mayor",null)));
+  const wrap=document.createElement("div");
+  wrap.className="loadedHint";
+  wrap.innerHTML=`<b>${DATA.mayors.length}</b> candidati sindaco caricati dall'amministratore. Inserisci o aggiorna qui i voti rilevati.`;
+  box.appendChild(wrap);
+  DATA.mayors.forEach((m,idx)=>{
+    const row=voteRow(m,"mayor",null);
+    row.querySelector(".name").innerHTML=`<span class="small">${idx+1}.</span> ${esc(m)}`;
+    box.appendChild(row);
+  });
 }
 function renderTabs(){
   tabs.innerHTML="";
@@ -169,7 +194,7 @@ function renderTabs(){
 function renderListPanel(){
   const panel=listPanel; panel.innerHTML=""; if(!currentList) return;
   const obj=DATA.lists[currentList];
-  const head=document.createElement("div"); head.className="listHeader"; head.innerHTML=`<div><b>${esc(currentList)}</b><br><span class="small">Coalizione/Sindaco: ${esc(obj.coalition)}</span></div>`; panel.appendChild(head);
+  const head=document.createElement("div"); head.className="listHeader"; head.innerHTML=`<div><b>${esc(currentList)}</b><br><span class="small">Numero lista: ${esc(obj.number||"—")} · Coalizione/Sindaco: ${esc(obj.coalition||"—")} · Candidati caricati: ${(obj.candidates||[]).length}</span></div>`; panel.appendChild(head);
   panel.appendChild(voteRow(currentList,"list",currentList));
   const search=document.createElement("input"); search.placeholder="Filtra candidato consigliere..."; search.className="search"; panel.appendChild(search);
   const candidates=document.createElement("div"); panel.appendChild(candidates);
@@ -200,12 +225,15 @@ function renderSplitSelectors(){
   if(!mayorSel || !listSel || !candSel || !DATA) return;
   const mayors=DATA.mayors||[];
   const lists=Object.keys(DATA.lists||{});
+  const oldMayor=mayorSel.value, oldList=listSel.value;
   mayorSel.innerHTML = mayors.length
     ? mayors.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("")
     : `<option value="">Caricare prima i candidati sindaco</option>`;
+  if(oldMayor && mayors.includes(oldMayor)) mayorSel.value=oldMayor;
   listSel.innerHTML = lists.length
-    ? lists.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join("")
+    ? lists.map(l=>`<option value="${esc(l)}">${esc(l)}${DATA.lists[l]?.number ? ' - n. '+esc(DATA.lists[l].number) : ''}</option>`).join("")
     : `<option value="">Caricare prima liste/consiglieri</option>`;
+  if(oldList && lists.includes(oldList)) listSel.value=oldList;
   listSel.onchange=()=>{
     const l=listSel.value;
     const candidates=(DATA.lists?.[l]?.candidates)||[];
