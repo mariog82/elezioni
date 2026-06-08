@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Importazione</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<header><h1>Importazione</h1><div>Importazioni CSV</div></header>
+<main>
+<section class="card warn"><h2>Ordine obbligatorio di configurazione</h2><p>La piattaforma parte senza sindaci, liste e candidati. Per abilitare inserimento voti, grafici e moduli premium caricare prima <b>sindaci</b> e poi <b>liste/coalizioni/consiglieri</b>. Solo dopo importare voti e sezioni.</p></section>
+
+<section class="card priority-import">
+  <h2>Importazioni prioritarie</h2>
+  <p class="small">
+    Import rapidi per aggiornare subito l'anagrafica dei candidati sindaco e le preferenze dei consiglieri.
+    I file CSV devono usare il separatore <b>;</b>. La sezione sindaci è posta prima e affianco all'upload dei candidati consiglieri.
+  </p>
+
+  <div class="grid two priority-grid">
+    <div class="card">
+      <h3>Importazione prioritaria sindaci</h3>
+      <p class="small">
+        Formato obbligatorio:<br>
+        <b>Numero Sindaco;Candidato Sindaco</b>
+      </p>
+      <input type="file" id="csv_priority_sindaci" accept=".csv,text/csv">
+      <button class="primary"
+        onclick="importGenericCsv('csv_priority_sindaci','/api/import/sindaci-priority')">
+        Importa candidati sindaco
+      </button>
+    </div>
+
+    <div class="card">
+      <h3>Importazione prioritaria consiglieri</h3>
+      <p class="small">
+        Formato obbligatorio:<br>
+        <b>Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato</b>
+      </p>
+      <input type="file" id="csv_priority_consiglieri" accept=".csv,text/csv">
+      <button class="primary"
+        onclick="importGenericCsv('csv_priority_consiglieri','/api/import/consiglieri-priority')">
+        Importa liste/coalizioni/consiglieri
+      </button>
+    </div>
+  </div>
+</section>
+
+<section class="card topbar">
+<button class="secondary" onclick="location.href='/admin'">Pannello admin</button>
+<div>
+<button onclick="loadDashboard()">Aggiorna</button>
+
+<button class="secondary" onclick="location.href='/app'">Torna all'app</button>
+</div>
+</section>
+
+
+<section class="card">
+  <h2>Importazione voti totali</h2>
+  <p class="small">
+    Carica i CSV dei risultati complessivi, senza colonna Sezione. Tutti i file devono usare il separatore <b>;</b>.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h3>Voti totali candidati sindaco</h3>
+      <p class="small">Formato: <b>Numero Sindaco;Candidato Sindaco;Voti validi;Voti solo Sind</b></p>
+      <input type="file" id="csv_tot_sindaci" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_tot_sindaci','/api/import/sindaci')">Importa sindaci totali</button>
+    </div>
+
+    <div class="card">
+      <h3>Voti totali liste</h3>
+      <p class="small">Formato: <b>Numero Liste;Nome Lista;Voti validi</b></p>
+      <input type="file" id="csv_tot_liste" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_tot_liste','/api/import/liste')">Importa liste totali</button>
+    </div>
+
+    <div class="card">
+      <h3>Preferenze totali consiglieri</h3>
+      <p class="small">Formato: <b>Numero Liste;Nome Lista;Numero Candidato;Nome Candidato;Voti validi</b></p>
+      <input type="file" id="csv_tot_consiglieri" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_tot_consiglieri','/api/import/consiglieri')">Importa consiglieri totali</button>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Importazione schede nulle e bianche</h2>
+  <p class="small">
+    Carica i CSV relativi a voti nulli, schede nulle, schede bianche e voti contestati/non assegnati.
+    Tutti i file devono usare il separatore <b>;</b>.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h3>Schede totali</h3>
+      <p class="small">Formato: <b>Voti nulli;Schede nulle;Schede bianche;V.cont.NoAss.</b></p>
+      <input type="file" id="csv_tot_schede" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_tot_schede','/api/import/schede')">Importa schede totali</button>
+    </div>
+
+    <div class="card">
+      <h3>Schede per sezione</h3>
+      <p class="small">Formato: <b>Sezione;Voti nulli;Schede nulle;Schede bianche;V.cont.NoAss.</b></p>
+      <input type="file" id="csv_sez_schede" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_sez_schede','/api/import/schede-sezioni')">Importa schede per sezione</button>
+    </div>
+  </div>
+</section>
+
+
+<section class="card">
+  <h2>Importazione voti sezione</h2>
+  <p class="small">
+    Carica i CSV dei risultati per singola sezione/seggio. Tutti i file devono usare il separatore <b>;</b>.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h3>Voti candidati sindaco per sezione</h3>
+      <p class="small">Formato: <b>Sezione;Numero Sindaco;Candidato Sindaco;Voti validi;Voti solo Sind</b></p>
+      <input type="file" id="csv_sez_sindaci" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_sez_sindaci','/api/import/sindaci-sezioni')">Importa sindaci per sezione</button>
+    </div>
+
+    <div class="card">
+      <h3>Voti liste per sezione</h3>
+      <p class="small">Formato: <b>Sezione;Numero Liste;Nome Lista;Voti validi</b></p>
+      <input type="file" id="csv_sez_liste" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_sez_liste','/api/import/liste-sezioni')">Importa liste per sezione</button>
+    </div>
+
+    <div class="card">
+      <h3>Preferenze consiglieri per sezione</h3>
+      <p class="small">Formato: <b>Sezione;Numero Liste;Nome Lista;Numero Candidato;Nome Candidato;Voti validi</b></p>
+      <input type="file" id="csv_sez_consiglieri" accept=".csv,text/csv">
+      <button onclick="importGenericCsv('csv_sez_consiglieri','/api/import/consiglieri-sezioni')">Importa consiglieri per sezione</button>
+    </div>
+  </div>
+</section>
+
+
+
+<section class="card importCsvBox">
+  <h2>Importa rappresentanti / utenti da CSV</h2>
+  <p class="small">
+    Carica un file CSV separato da punto e virgola con questo formato:<br>
+    <b>nome;telefono/codice;sezione;ruolo;pin</b>
+  </p>
+  <input type="file" id="csvUsersFile" accept=".csv,text/csv">
+  <div class="actions">
+    <button onclick="importUsersCsv()">Importa CSV rappresentanti/utenti</button>
+  </div>
+</section>
+</main>
+<script src="/admin.js"></script>
+</body>
+</html>
