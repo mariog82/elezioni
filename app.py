@@ -164,6 +164,52 @@ def module_enabled(key):
     conn = db(); cfg = get_module_config(conn); conn.close()
     return cfg.get(key, False)
 
+def get_admin_module_permissions(conn, user_id):
+    """Restituisce i moduli visibili per uno specifico Admin.
+
+    Regola operativa:
+    - Super Utente: vede sempre tutti i moduli globalmente attivi.
+    - Admin: vede solo i moduli globalmente attivi E assegnati dal Super Utente.
+    - Se un Admin non ha ancora righe di permesso, per compatibilità iniziale
+      vengono considerati assegnati tutti i moduli globalmente attivi; appena il
+      Super Utente salva una configurazione, valgono solo le scelte salvate.
+    """
+    global_cfg = get_module_config(conn)
+    rows = conn.execute("SELECT module_key, enabled FROM admin_module_permissions WHERE user_id=?", (user_id,)).fetchall()
+    if not rows:
+        return {key: bool(global_cfg.get(key, False)) for key in MODULE_CATALOG}
+    assigned = {r["module_key"]: bool(r["enabled"]) for r in rows}
+    return {key: bool(global_cfg.get(key, False)) and bool(assigned.get(key, False)) for key in MODULE_CATALOG}
+
+def save_admin_module_permissions(conn, user_id, modules):
+    """Salva l'associazione moduli->Admin effettuata dal Super Utente."""
+    now = datetime.now().isoformat(timespec="seconds")
+    clean = {}
+    for key in MODULE_CATALOG:
+        enabled = int(bool(modules.get(key, False)))
+        clean[key] = bool(enabled)
+        conn.execute("""
+            INSERT OR REPLACE INTO admin_module_permissions(user_id, module_key, enabled, updated_at)
+            VALUES(?,?,?,?)
+        """, (user_id, key, enabled, now))
+    return clean
+
+def current_user_module_enabled(key):
+    """Controlla se il modulo è accessibile dall'utente loggato."""
+    user = current_user()
+    if not user:
+        return False
+    role = str(user["role"]).lower()
+    conn = db()
+    if role == "superadmin":
+        allowed = get_module_config(conn).get(key, False)
+    elif role == "admin":
+        allowed = get_admin_module_permissions(conn, user["id"]).get(key, False)
+    else:
+        allowed = False
+    conn.close()
+    return bool(allowed)
+
 def fast_pin_hash(pin):
     # Import CSV: hashing volutamente leggero per evitare timeout su Render.
     # check_password_hash resta compatibile con questo formato Werkzeug.
@@ -217,6 +263,18 @@ def init_db():
         webhook_url TEXT,
         notes TEXT,
         updated_at TEXT
+    )""")
+    # v74 - permessi granulari dei moduli per singolo Admin.
+    # Il Super Utente decide quali moduli premium compaiono e sono utilizzabili
+    # da ciascun account Admin cliente. Se un modulo non è abilitato qui, non
+    # deve comparire nei pulsanti dell'area Admin e le API/pagine dedicate sono bloccate.
+    cur.execute("""CREATE TABLE IF NOT EXISTS admin_module_permissions (
+        user_id INTEGER NOT NULL,
+        module_key TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT,
+        PRIMARY KEY(user_id, module_key),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,7 +442,16 @@ def public_user(user):
         allowed = _allowed_lists_from_user(user)
     except Exception:
         allowed = []
-    return {"id": user["id"], "name": user["name"], "phone": user["phone"], "role": user["role"], "section": user["section"], "allowed_lists": allowed, "is_super": str(user["role"]).lower() == "superadmin"}
+    enabled_modules = []
+    if str(user["role"]).lower() in ["admin", "superadmin"]:
+        conn = db()
+        if str(user["role"]).lower() == "superadmin":
+            cfg = get_module_config(conn)
+        else:
+            cfg = get_admin_module_permissions(conn, user["id"])
+        conn.close()
+        enabled_modules = [key for key, enabled in cfg.items() if enabled]
+    return {"id": user["id"], "name": user["name"], "phone": user["phone"], "role": user["role"], "section": user["section"], "allowed_lists": allowed, "is_super": str(user["role"]).lower() == "superadmin", "enabled_modules": enabled_modules}
 
 def login_required(fn):
     @wraps(fn)
@@ -583,7 +650,7 @@ def admin_blockchain_page():
         return redirect("/")
     if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
-    if not module_enabled("blockchain"):
+    if not current_user_module_enabled("blockchain"):
         return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_blockchain.html")
 
@@ -594,7 +661,7 @@ def admin_osint_page():
         return redirect("/")
     if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
-    if not module_enabled("osint"):
+    if not current_user_module_enabled("osint"):
         return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_osint.html")
 
@@ -605,7 +672,7 @@ def admin_simulator_page():
         return redirect("/")
     if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
-    if not module_enabled("simulator"):
+    if not current_user_module_enabled("simulator"):
         return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_simulator.html")
 
@@ -616,7 +683,7 @@ def admin_intelligence_page():
         return redirect("/")
     if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
-    if not module_enabled("intelligence"):
+    if not current_user_module_enabled("intelligence"):
         return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_intelligence.html")
 
@@ -627,7 +694,7 @@ def admin_social_page():
         return redirect("/")
     if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
-    if not module_enabled("social"):
+    if not current_user_module_enabled("social"):
         return redirect("/admin/modules")
     return send_from_directory(STATIC_DIR, "admin_social.html")
 
@@ -2319,20 +2386,58 @@ def export_csv():
 @app.get("/api/modules")
 @admin_required
 def get_modules_api():
+    user = current_user()
     conn = db()
-    cfg = get_module_config(conn)
+    if str(user["role"]).lower() == "superadmin":
+        cfg = get_module_config(conn)
+        scope = "global"
+    else:
+        cfg = get_admin_module_permissions(conn, user["id"])
+        scope = "admin"
     conn.close()
     modules = [{**MODULE_CATALOG[k], "key": k, "enabled": cfg.get(k, False)} for k in MODULE_CATALOG]
-    return jsonify({"ok": True, "modules": modules, "config": cfg})
+    return jsonify({"ok": True, "modules": modules, "config": cfg, "scope": scope})
 
 @app.post("/api/modules")
-@admin_required
+@super_required
 def save_modules_api():
+    # Solo il Super Utente modifica il catalogo globale dei moduli vendibili.
     data = request.get_json(force=True).get("modules", {})
     conn = db()
     cfg = save_module_config(conn, data)
     conn.commit(); conn.close()
     return jsonify({"ok": True, "config": cfg, "message": "Moduli aggiornati"})
+
+@app.get("/api/admin/available-modules")
+@admin_required
+def admin_available_modules_api():
+    user = current_user()
+    conn = db()
+    if str(user["role"]).lower() == "superadmin":
+        cfg = get_module_config(conn)
+    else:
+        cfg = get_admin_module_permissions(conn, user["id"])
+    conn.close()
+    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": bool(cfg.get(k, False))} for k in MODULE_CATALOG if cfg.get(k, False)]
+    return jsonify({"ok": True, "modules": modules})
+
+@app.get("/api/admin/payment-info")
+@admin_required
+def admin_payment_info_api():
+    # Informazioni di pagamento mostrate all'Admin cliente.
+    # Non avvia pagamenti reali: espone provider configurati e istruzioni.
+    user = current_user()
+    conn = db()
+    profile = conn.execute("SELECT * FROM admin_profiles WHERE user_id=?", (user["id"],)).fetchone() if str(user["role"]).lower() == "admin" else None
+    payments = conn.execute("SELECT provider, enabled, mode, public_key, webhook_url, notes FROM payment_methods WHERE enabled=1 ORDER BY provider").fetchall()
+    conn.close()
+    instructions = [
+        "Scegliere uno dei metodi abilitati dal Super Utente.",
+        "Per carte/checkout usare il link o public key configurata dal provider.",
+        "Per bonifico o PagoPA seguire le note operative indicate dal Super Utente.",
+        "Dopo il pagamento l'attivazione commerciale dei moduli resta gestita dal Super Utente."
+    ]
+    return jsonify({"ok": True, "profile": dict(profile) if profile else {}, "payments": [dict(p) for p in payments], "instructions": instructions})
 
 def _rows_for_audit(conn):
     return conn.execute("""
@@ -2345,7 +2450,7 @@ def _rows_for_audit(conn):
 @app.get("/api/blockchain")
 @admin_required
 def blockchain_api():
-    if not module_enabled("blockchain"):
+    if not current_user_module_enabled("blockchain"):
         return jsonify({"ok": False, "error": "Modulo blockchain non attivo"}), 403
     conn = db()
     rows = _rows_for_audit(conn)
@@ -2372,7 +2477,7 @@ def blockchain_api():
 @app.get("/api/osint")
 @admin_required
 def osint_api():
-    if not module_enabled("osint"):
+    if not current_user_module_enabled("osint"):
         return jsonify({"ok": False, "error": "Modulo OSINT non attivo"}), 403
     conn = db()
     payload = _intelligence_payload(conn)
@@ -2394,7 +2499,7 @@ def osint_api():
 @app.post("/api/simulator")
 @admin_required
 def simulator_api():
-    if not module_enabled("simulator"):
+    if not current_user_module_enabled("simulator"):
         return jsonify({"ok": False, "error": "Modulo simulatore non attivo"}), 403
     data = request.get_json(force=True)
     turnout_delta = float(data.get("turnout_delta", 0) or 0)
@@ -2433,10 +2538,15 @@ def super_overview():
     users_rows = conn.execute("SELECT id, name, phone, role, section, active, created_at FROM users ORDER BY role, name").fetchall()
     profiles_rows = conn.execute("SELECT * FROM admin_profiles").fetchall()
     payments_rows = conn.execute("SELECT * FROM payment_methods ORDER BY provider").fetchall()
-    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": get_module_config(conn).get(k, False)} for k in MODULE_CATALOG]
+    global_cfg = get_module_config(conn)
+    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": global_cfg.get(k, False)} for k in MODULE_CATALOG]
+    permissions = {}
+    for u in users_rows:
+        if str(u["role"]).lower() == "admin":
+            permissions[str(u["id"])] = get_admin_module_permissions(conn, u["id"])
     conn.close()
     profiles = {str(r["user_id"]): dict(r) for r in profiles_rows}
-    return jsonify({"ok": True, "users": [dict(r) for r in users_rows], "profiles": profiles, "payments": [dict(r) for r in payments_rows], "modules": modules})
+    return jsonify({"ok": True, "users": [dict(r) for r in users_rows], "profiles": profiles, "payments": [dict(r) for r in payments_rows], "modules": modules, "permissions": permissions})
 
 @app.post("/api/super/admins")
 @super_required
@@ -2457,6 +2567,14 @@ def super_create_admin():
         user_id = cur.lastrowid
         conn.execute("INSERT OR REPLACE INTO admin_profiles(user_id, organization, place, cap, province, region, usage_reason, beneficiaries, notes, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (user_id, str(data.get("organization", "")).strip(), str(data.get("place", "")).strip(), str(data.get("cap", "")).strip(), str(data.get("province", "")).strip(), str(data.get("region", "")).strip(), str(data.get("usage_reason", "")).strip(), str(data.get("beneficiaries", "")).strip(), str(data.get("notes", "")).strip(), now))
+        # Se la schermata Super Utente invia già i moduli scelti, li associa subito.
+        # In caso contrario l'admin nasce con tutti i moduli globali attivi,
+        # modificabili successivamente dalla tabella Admin registrati.
+        modules_payload = data.get("modules")
+        if isinstance(modules_payload, dict):
+            save_admin_module_permissions(conn, user_id, modules_payload)
+        else:
+            save_admin_module_permissions(conn, user_id, get_module_config(conn))
         conn.commit()
     except sqlite3.IntegrityError:
         conn.close(); return jsonify({"ok": False, "error": "Telefono/codice già esistente"}), 409
@@ -2476,6 +2594,21 @@ def super_update_admin_profile(user_id):
         (user_id, str(data.get("organization", "")).strip(), str(data.get("place", "")).strip(), str(data.get("cap", "")).strip(), str(data.get("province", "")).strip(), str(data.get("region", "")).strip(), str(data.get("usage_reason", "")).strip(), str(data.get("beneficiaries", "")).strip(), str(data.get("notes", "")).strip(), now))
     conn.commit(); conn.close()
     return jsonify({"ok": True, "message": "Profilo admin aggiornato"})
+
+@app.post("/api/super/admins/<int:user_id>/modules")
+@super_required
+def super_update_admin_modules(user_id):
+    # Associazione moduli al singolo Admin cliente.
+    # I pulsanti non assegnati non compariranno nel suo pannello.
+    data = request.get_json(force=True)
+    modules = data.get("modules", {})
+    conn = db()
+    row = conn.execute("SELECT id, role FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row or str(row["role"]).lower() != "admin":
+        conn.close(); return jsonify({"ok": False, "error": "È possibile assegnare moduli solo a utenti admin"}), 400
+    clean = save_admin_module_permissions(conn, user_id, modules)
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "permissions": clean, "message": "Moduli assegnati all'admin"})
 
 @app.post("/api/super/payments")
 @super_required

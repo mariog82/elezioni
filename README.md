@@ -634,3 +634,30 @@ La schermata salva provider, stato, modalità test/live, chiave pubblica/alias e
 - `POST /api/super/payments`
 - `GET /api/super/payment-providers`
 
+
+## v74 - Permessi moduli per singolo Admin e pagamento visibile all'Admin
+
+Questa versione introduce una separazione più netta tra **Super Utente** e **Admin cliente**.
+
+### Moduli assegnati all'Admin
+
+Il Super Utente, dalla pagina `/super`, può:
+
+1. abilitare o disabilitare globalmente i moduli commerciali della piattaforma;
+2. associare a ciascun Admin solo i moduli acquistati/abilitati;
+3. modificare in ogni momento le assegnazioni nella tabella “Admin registrati, profili e moduli assegnati”.
+
+Un Admin vede nel proprio pannello `/admin` solo i pulsanti relativi ai moduli che gli sono stati associati. I moduli non assegnati non vengono mostrati e le relative pagine/API sono protette lato server.
+
+### Pagamenti nell'area Admin
+
+Nel pannello `/admin` è stata aggiunta la sezione **Modalità di pagamento**. L'Admin visualizza:
+
+- il proprio profilo cliente/territoriale;
+- i metodi di pagamento abilitati dal Super Utente;
+- le istruzioni operative per pagare;
+- note, link, alias o riferimenti configurati dal Super Utente.
+
+I provider supportati/configurabili sono: Stripe, PayPal, Nexi, Satispay, PagoPA, Bonifico e Altro.
+
+In produzione le chiavi segrete non devono essere salvate nel browser o nel database come testo libero, ma impostate come variabili d'ambiente del server.
