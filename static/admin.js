@@ -24,6 +24,57 @@ async function api(url, options={}){
   return data;
 }
 
+function adminModuleLabel(key, title){
+  const labels={
+    intelligence:"Political Intelligence",
+    social:"Social & Viral",
+    blockchain:"Blockchain/DAO/NFT",
+    osint:"OSINT politico",
+    simulator:"Simulatore"
+  };
+  return labels[key] || title;
+}
+
+async function loadAdminModuleButtons(){
+  const box=document.getElementById("adminModuleButtons");
+  if(!box || box.dataset.loaded==="1") return;
+  const base=[
+    {label:"Grafici", path:"/admin/charts", cls:""},
+    {label:"Importazione", path:"/admin/imports", cls:""},
+    {label:"Gestione utenti", path:"/admin/users", cls:""},
+    {label:"Esporta CSV", path:"/api/export.csv", cls:"secondary"}
+  ];
+  const d=await api("/api/admin/available-modules");
+  const premium=(d.modules||[]).map(m=>({label:adminModuleLabel(m.key,m.title), path:m.path, cls:""}));
+  box.innerHTML=[...base,...premium].map(b=>`<button class="${b.cls||""}" onclick="location.href='${b.path}'">${b.label}</button>`).join("");
+  box.dataset.loaded="1";
+}
+
+async function loadAdminPaymentBox(){
+  const box=document.getElementById("adminPaymentBox");
+  if(!box || box.dataset.loaded==="1") return;
+  const d=await api("/api/admin/payment-info");
+  const profile=d.profile||{};
+  const payments=d.payments||[];
+  const paymentRows=payments.length ? payments.map(p=>`<tr><td><b>${p.provider}</b><br><span class="small">${p.mode||"test"}</span></td><td>${p.public_key||"—"}</td><td>${p.webhook_url||"—"}</td><td>${p.notes||"—"}</td></tr>`).join("") : `<tr><td colspan="4">Nessun metodo di pagamento abilitato. Contattare il Super Utente.</td></tr>`;
+  box.innerHTML=`
+    <div class="grid two">
+      <div>
+        <h3>Profilo cliente</h3>
+        <p><b>Organizzazione:</b> ${profile.organization||"—"}<br>
+        <b>Territorio:</b> ${(profile.place||"—")} ${(profile.cap||"")} ${(profile.province||"")}<br>
+        <b>Motivo:</b> ${profile.usage_reason||"—"}<br>
+        <b>Beneficiari:</b> ${profile.beneficiaries||"—"}</p>
+      </div>
+      <div>
+        <h3>Come pagare</h3>
+        <ol>${(d.instructions||[]).map(x=>`<li>${x}</li>`).join("")}</ol>
+      </div>
+    </div>
+    <div class="tablewrap"><table><thead><tr><th>Metodo</th><th>Chiave/link/alias</th><th>Webhook/link operativo</th><th>Note</th></tr></thead><tbody>${paymentRows}</tbody></table></div>`;
+  box.dataset.loaded="1";
+}
+
 async function loadDashboard(){
   try{
     const d=await api("/api/dashboard");
@@ -37,6 +88,8 @@ async function loadDashboard(){
     if(hasEl("electedBox")) renderElected(d);
     if(hasEl("chartTabLists") || hasEl("chartTabPrefs")) await renderDetailCharts();
     if(hasEl("users")) await loadUsers();
+    if(hasEl("adminModuleButtons")) await loadAdminModuleButtons();
+    if(hasEl("adminPaymentBox")) await loadAdminPaymentBox();
 
   }catch(e){
     alert(e.message+"\nAccedi come amministratore.");

@@ -62,3 +62,14 @@ button:disabled{opacity:.65;cursor:not-allowed}.userBadge{display:flex;gap:10px;
 .listDetails summary{cursor:pointer}
 .loadedHint{background:#f8f4ef;border:1px solid #eadfd2;border-radius:12px;padding:10px 12px;margin-bottom:10px;color:#4b3621}
 .adminReturnBtn{width:100%;margin-top:8px}
+
+/* v74 - permessi moduli e pagamenti admin */
+.moduleGrid.compact{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.checkCard{display:flex;align-items:flex-start;gap:10px;border:1px solid #e4e7ec;border-radius:14px;padding:10px;background:#fff;cursor:pointer}
+.checkCard input{width:auto;margin-top:3px}
+.checkCard:has(input:checked){border-color:#1f5eff;background:#eef4ff}
+.moduleAssign{display:flex;flex-direction:column;gap:6px;min-width:220px}
+.moduleAssign label{font-size:.9rem;display:flex;gap:8px;align-items:center}
+.moduleAssign input{width:auto}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+#adminModuleButtons button{margin:4px}
