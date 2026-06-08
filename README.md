@@ -579,3 +579,58 @@ Nota: il modulo blockchain è predisposto come audit/notarizzazione applicativa.
 - Se l’utente autenticato ha ruolo `admin`, sotto **Dashboard pubblica** compare il pulsante **Torna al pannello Admin**.
 - La dashboard operativa visualizza sempre le anagrafiche caricate: candidati sindaco, liste e candidati consiglieri, lette dall’endpoint `/api/config`.
 - L’importazione prioritaria consiglieri conserva anche il numero lista, così la sezione “Liste e candidati consiglieri” mostra dati più completi.
+
+## v73 - Super Utente, pagamenti e profili admin
+
+Questa versione introduce un livello superiore di governance della piattaforma.
+
+### Credenziali iniziali Super Utente
+- Codice/telefono: `super`
+- PIN: `0000`
+
+Il Super Utente accede alla nuova pagina `/super` e può:
+
+1. **Gestire i moduli da visualizzare**
+   - Political Intelligence Platform
+   - Social & Viral
+   - Blockchain Electoral Audit / DAO / NFT
+   - OSINT politico
+   - Simulatore elettorale
+
+2. **Creare solamente utenti Admin**
+   - Il Super Utente crea i clienti/amministratori della piattaforma.
+   - I rappresentanti/rilevatori restano gestiti dall'Admin dentro il pannello utenti.
+
+3. **Registrare le informazioni dell'Admin cliente**
+   - organizzazione;
+   - luogo;
+   - CAP;
+   - provincia;
+   - regione;
+   - motivo di utilizzo dell'app;
+   - beneficiari dell'app;
+   - note operative/commerciali.
+
+4. **Gestire i metodi di pagamento**
+   - Stripe;
+   - PayPal;
+   - Nexi;
+   - Satispay;
+   - PagoPA;
+   - bonifico;
+   - altro.
+
+La schermata salva provider, stato, modalità test/live, chiave pubblica/alias e webhook. In produzione le chiavi segrete non devono essere salvate nel database: devono essere configurate come variabili d'ambiente sul server, ad esempio `STRIPE_SECRET_KEY`, `PAYPAL_SECRET`, `NEXI_SECRET_KEY`.
+
+### Tabelle aggiunte
+- `admin_profiles`: profilo territoriale/commerciale dell'Admin.
+- `payment_methods`: configurazione dei metodi di pagamento.
+
+### Endpoint aggiunti
+- `GET /super`
+- `GET /api/super/overview`
+- `POST /api/super/admins`
+- `PATCH /api/super/admins/<id>/profile`
+- `POST /api/super/payments`
+- `GET /api/super/payment-providers`
+

@@ -189,6 +189,35 @@ def init_db():
         active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL
     )""")
+    # v73 - profili commerciali/territoriali degli amministratori clienti.
+    # Il super utente li compila per sapere chi utilizza la piattaforma,
+    # in quale territorio opera e per quali beneficiari viene acquistata/usata.
+    cur.execute("""CREATE TABLE IF NOT EXISTS admin_profiles (
+        user_id INTEGER PRIMARY KEY,
+        organization TEXT,
+        place TEXT,
+        cap TEXT,
+        province TEXT,
+        region TEXT,
+        usage_reason TEXT,
+        beneficiaries TEXT,
+        notes TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""")
+    # v73 - configurazione metodi di pagamento. Non salva segreti reali in chiaro
+    # in produzione: qui vengono registrati provider, stato e chiavi pubbliche/test.
+    # I secret reali vanno configurati come variabili d'ambiente su Render/server.
+    cur.execute("""CREATE TABLE IF NOT EXISTS payment_methods (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        mode TEXT NOT NULL DEFAULT 'test',
+        public_key TEXT,
+        webhook_url TEXT,
+        notes TEXT,
+        updated_at TEXT
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
@@ -263,6 +292,7 @@ def init_db():
     if cur.fetchone()["n"] == 0:
         now = datetime.now().isoformat(timespec="seconds")
         demo_users = [
+            ("Super Utente Piattaforma", "super", "0000", "superadmin", None),
             ("Amministratore Centrale", "admin", "1234", "admin", None),
             ("Rappresentante Sezione 1", "3330000001", "1111", "rappresentante", "1"),
             ("Rappresentante Sezione 2", "3330000002", "2222", "rappresentante", "2"),
@@ -272,6 +302,12 @@ def init_db():
                 "INSERT INTO users(name, phone, pin_hash, qr_token, role, section, active, created_at) VALUES(?,?,?,?,?,?,1,?)",
                 (name, phone, generate_password_hash(pin), secrets.token_urlsafe(24), role, section, now),
             )
+
+    # v73: garantisce la presenza del super utente anche su installazioni
+    # già popolate, dove il blocco demo iniziale non verrebbe rieseguito.
+    now_super = datetime.now().isoformat(timespec="seconds")
+    cur.execute("INSERT OR IGNORE INTO users(name, phone, pin_hash, qr_token, role, section, allowed_lists, active, created_at) VALUES(?,?,?,?,?,?,?,1,?)",
+        ("Super Utente Piattaforma", "super", generate_password_hash("0000"), secrets.token_urlsafe(24), "superadmin", None, "", now_super))
 
     # Un solo record logico per sezione/seggio:
     # primo inserimento = INSERT, salvataggi successivi = UPDATE.
@@ -348,7 +384,7 @@ def public_user(user):
         allowed = _allowed_lists_from_user(user)
     except Exception:
         allowed = []
-    return {"id": user["id"], "name": user["name"], "phone": user["phone"], "role": user["role"], "section": user["section"], "allowed_lists": allowed}
+    return {"id": user["id"], "name": user["name"], "phone": user["phone"], "role": user["role"], "section": user["section"], "allowed_lists": allowed, "is_super": str(user["role"]).lower() == "superadmin"}
 
 def login_required(fn):
     @wraps(fn)
@@ -364,8 +400,20 @@ def admin_required(fn):
         user = current_user()
         if not user:
             return jsonify({"ok": False, "error": "Accesso non autorizzato"}), 401
-        if str(user["role"]).lower() != "admin":
+        if str(user["role"]).lower() not in ["admin", "superadmin"]:
             return jsonify({"ok": False, "error": "Funzione riservata all'amministratore"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def super_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return jsonify({"ok": False, "error": "Accesso non autorizzato"}), 401
+        if str(user["role"]).lower() != "superadmin":
+            return jsonify({"ok": False, "error": "Funzione riservata al super utente"}), 403
         return fn(*args, **kwargs)
     return wrapper
 
@@ -454,7 +502,7 @@ def login_page():
     # Prima schermata: accesso guidato. Se già autenticato porta l'utente alla propria area.
     user = current_user()
     if user:
-        return redirect("/admin" if str(user["role"]).lower() == "admin" else "/app")
+        return redirect("/super" if str(user["role"]).lower() == "superadmin" else ("/admin" if str(user["role"]).lower() == "admin" else "/app"))
     return send_from_directory(STATIC_DIR, "login.html")
 
 @app.route("/app")
@@ -463,12 +511,21 @@ def index():
         return redirect("/")
     return send_from_directory(STATIC_DIR, "index.html")
 
+@app.route("/super")
+def super_page():
+    user = current_user()
+    if not user:
+        return redirect("/")
+    if str(user["role"]).lower() != "superadmin":
+        return redirect("/admin" if str(user["role"]).lower() == "admin" else "/app")
+    return send_from_directory(STATIC_DIR, "super.html")
+
 @app.route("/admin")
 def admin_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin.html")
 
@@ -478,7 +535,7 @@ def admin_charts_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_charts.html")
 
@@ -487,7 +544,7 @@ def admin_imports_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_imports.html")
 
@@ -496,7 +553,7 @@ def admin_users_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_users.html")
 
@@ -506,7 +563,7 @@ def admin_tools_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_tools.html")
 
@@ -515,7 +572,7 @@ def admin_modules_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     return send_from_directory(STATIC_DIR, "admin_modules.html")
 
@@ -524,7 +581,7 @@ def admin_blockchain_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     if not module_enabled("blockchain"):
         return redirect("/admin/modules")
@@ -535,7 +592,7 @@ def admin_osint_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     if not module_enabled("osint"):
         return redirect("/admin/modules")
@@ -546,7 +603,7 @@ def admin_simulator_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     if not module_enabled("simulator"):
         return redirect("/admin/modules")
@@ -557,7 +614,7 @@ def admin_intelligence_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     if not module_enabled("intelligence"):
         return redirect("/admin/modules")
@@ -568,7 +625,7 @@ def admin_social_page():
     user = current_user()
     if not user:
         return redirect("/")
-    if str(user["role"]).lower() != "admin":
+    if str(user["role"]).lower() not in ["admin", "superadmin"]:
         return redirect("/app")
     if not module_enabled("social"):
         return redirect("/admin/modules")
@@ -2364,6 +2421,92 @@ def simulator_api():
         lists.append({**l, "simulated": round(projected)})
     mayors.sort(key=lambda x: -x["simulated"]); lists.sort(key=lambda x: -x["simulated"])
     return jsonify({"ok": True, "scenario": {"turnout_delta": turnout_delta, "mayor_swing": mayor_swing, "list_swing": list_swing, "target_mayor": target_mayor, "target_list": target_list}, "mayors": mayors, "lists": lists, "base_seats": seats, "note": "Simulazione esplorativa calcolata sui dati caricati e sulle proiezioni correnti."})
+
+
+# =========================
+# v73 - SUPER UTENTE
+# =========================
+@app.get("/api/super/overview")
+@super_required
+def super_overview():
+    conn = db()
+    users_rows = conn.execute("SELECT id, name, phone, role, section, active, created_at FROM users ORDER BY role, name").fetchall()
+    profiles_rows = conn.execute("SELECT * FROM admin_profiles").fetchall()
+    payments_rows = conn.execute("SELECT * FROM payment_methods ORDER BY provider").fetchall()
+    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": get_module_config(conn).get(k, False)} for k in MODULE_CATALOG]
+    conn.close()
+    profiles = {str(r["user_id"]): dict(r) for r in profiles_rows}
+    return jsonify({"ok": True, "users": [dict(r) for r in users_rows], "profiles": profiles, "payments": [dict(r) for r in payments_rows], "modules": modules})
+
+@app.post("/api/super/admins")
+@super_required
+def super_create_admin():
+    # Il super utente crea esclusivamente account Admin/clienti.
+    # Rilevatori e rappresentanti restano gestiti dall'admin nel pannello utenti.
+    data = request.get_json(force=True)
+    name = str(data.get("name", "")).strip()
+    phone = str(data.get("phone", "")).strip()
+    pin = str(data.get("pin", "")).strip()
+    if not name or not phone or not pin:
+        return jsonify({"ok": False, "error": "Nome, telefono/codice e PIN sono obbligatori"}), 400
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = db()
+    try:
+        cur = conn.execute("INSERT INTO users(name, phone, pin_hash, qr_token, role, section, allowed_lists, active, created_at) VALUES(?,?,?,?,?,?,?,1,?)",
+            (name, phone, generate_password_hash(pin), secrets.token_urlsafe(24), "admin", None, "", now))
+        user_id = cur.lastrowid
+        conn.execute("INSERT OR REPLACE INTO admin_profiles(user_id, organization, place, cap, province, region, usage_reason, beneficiaries, notes, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (user_id, str(data.get("organization", "")).strip(), str(data.get("place", "")).strip(), str(data.get("cap", "")).strip(), str(data.get("province", "")).strip(), str(data.get("region", "")).strip(), str(data.get("usage_reason", "")).strip(), str(data.get("beneficiaries", "")).strip(), str(data.get("notes", "")).strip(), now))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close(); return jsonify({"ok": False, "error": "Telefono/codice già esistente"}), 409
+    conn.close()
+    return jsonify({"ok": True, "message": "Admin creato e profilato", "user_id": user_id})
+
+@app.patch("/api/super/admins/<int:user_id>/profile")
+@super_required
+def super_update_admin_profile(user_id):
+    data = request.get_json(force=True)
+    conn = db()
+    row = conn.execute("SELECT id, role FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row or str(row["role"]).lower() != "admin":
+        conn.close(); return jsonify({"ok": False, "error": "È possibile profilare solo utenti admin"}), 400
+    now = datetime.now().isoformat(timespec="seconds")
+    conn.execute("INSERT OR REPLACE INTO admin_profiles(user_id, organization, place, cap, province, region, usage_reason, beneficiaries, notes, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (user_id, str(data.get("organization", "")).strip(), str(data.get("place", "")).strip(), str(data.get("cap", "")).strip(), str(data.get("province", "")).strip(), str(data.get("region", "")).strip(), str(data.get("usage_reason", "")).strip(), str(data.get("beneficiaries", "")).strip(), str(data.get("notes", "")).strip(), now))
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "message": "Profilo admin aggiornato"})
+
+@app.post("/api/super/payments")
+@super_required
+def super_save_payment_method():
+    data = request.get_json(force=True)
+    provider = str(data.get("provider", "")).strip()
+    if provider not in ["Stripe", "PayPal", "Nexi", "Satispay", "PagoPA", "Bonifico", "Altro"]:
+        return jsonify({"ok": False, "error": "Provider non valido"}), 400
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = db()
+    existing = conn.execute("SELECT id FROM payment_methods WHERE provider=?", (provider,)).fetchone()
+    payload = (int(bool(data.get("enabled", False))), str(data.get("mode", "test")).strip() or "test", str(data.get("public_key", "")).strip(), str(data.get("webhook_url", "")).strip(), str(data.get("notes", "")).strip(), now)
+    if existing:
+        conn.execute("UPDATE payment_methods SET enabled=?, mode=?, public_key=?, webhook_url=?, notes=?, updated_at=? WHERE provider=?", (*payload, provider))
+    else:
+        conn.execute("INSERT INTO payment_methods(provider, enabled, mode, public_key, webhook_url, notes, updated_at) VALUES(?,?,?,?,?,?,?)", (provider, *payload))
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "message": "Metodo di pagamento aggiornato"})
+
+@app.get("/api/super/payment-providers")
+@super_required
+def super_payment_providers():
+    # Schede tecniche per collegare in produzione le API principali.
+    providers = [
+        {"provider": "Stripe", "api": "Checkout Sessions / Payment Links", "env": ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"], "use": "Carte, wallet, abbonamenti SaaS"},
+        {"provider": "PayPal", "api": "Orders API / Subscriptions API", "env": ["PAYPAL_CLIENT_ID", "PAYPAL_SECRET"], "use": "Pagamenti account PayPal e carte"},
+        {"provider": "Nexi", "api": "XPay / Hosted Payment Page", "env": ["NEXI_ALIAS", "NEXI_SECRET_KEY"], "use": "Circuiti bancari italiani"},
+        {"provider": "Satispay", "api": "Online Payments API", "env": ["SATISPAY_KEY_ID", "SATISPAY_PRIVATE_KEY"], "use": "Pagamenti mobile"},
+        {"provider": "PagoPA", "api": "Partner/PSP integration", "env": ["PAGOPA_SUBSCRIPTION_KEY"], "use": "Scenari PA/enti aderenti"}
+    ]
+    return jsonify({"ok": True, "providers": providers})
 
 if __name__ == "__main__":
     init_db()
