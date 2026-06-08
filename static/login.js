@@ -17,17 +17,17 @@ async function login(){
   try{
     const d=await api('/api/login',{method:'POST',body:JSON.stringify({phone,pin})});
     setMsg('Accesso riuscito. Apertura area di lavoro...', 'ok');
-    location.href = d.user && d.user.role === 'admin' ? '/admin' : '/app';
+    location.href = d.user && d.user.role === 'superadmin' ? '/super' : (d.user && d.user.role === 'admin' ? '/admin' : '/app');
   }catch(e){ setMsg(e.message, 'bad'); }
   finally{ btn.disabled=false; btn.textContent='Entra'; }
 }
 async function boot(){
   const token=new URLSearchParams(location.search).get('token');
   if(token){
-    try{ const d=await api('/api/login',{method:'POST',body:JSON.stringify({token})}); location.href=d.user.role==='admin'?'/admin':'/app'; return; }
+    try{ const d=await api('/api/login',{method:'POST',body:JSON.stringify({token})}); location.href=d.user.role==='superadmin'?'/super':(d.user.role==='admin'?'/admin':'/app'); return; }
     catch(e){ setMsg('QR/token non valido o non più attivo.', 'bad'); }
   }
-  try{ const me=await api('/api/me'); location.href = me.user.role==='admin'?'/admin':'/app'; }catch(e){}
+  try{ const me=await api('/api/me'); location.href = me.user.role==='superadmin'?'/super':(me.user.role==='admin'?'/admin':'/app'); }catch(e){}
 }
 document.addEventListener('keydown', e=>{ if(e.key==='Enter') login(); });
 boot();
