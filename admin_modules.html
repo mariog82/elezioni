@@ -1,0 +1,7 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Moduli piattaforma</title><link rel="stylesheet" href="/style.css"></head><body>
+<header><h1>Gestione moduli</h1><div>Attiva solo le funzionalità desiderate: Intelligence, Social, Blockchain, OSINT e Simulatore</div></header>
+<main>
+<section class="card topbar"><button class="secondary" onclick="location.href='/admin'">Torna al pannello</button><div><button onclick="saveModules()">Salva moduli attivi</button></div></section>
+<section class="card ok"><h2>Architettura modulare</h2><p class="small">Ogni modulo può coesistere con gli altri oppure essere disattivato. L'amministratore decide quali funzionalità rendere disponibili nella webapp.</p><div id="moduleGrid" class="moduleGrid"></div></section>
+<section class="card warn"><h2>Accesso rapido ai moduli attivi</h2><div id="moduleLinks" class="actions"></div></section>
+</main><script src="/admin_modules.js"></script></body></html>
