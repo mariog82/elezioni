@@ -841,6 +841,185 @@ def tenant_apply_plan(tenant_id: int):
     audit(conn,tenant_id,current_user()["id"],"apply_sales_plan","tenants",d)
     conn.commit(); conn.close(); return jsonify({"ok":True,"tenant_id":tenant_id,"plan":plan_key})
 
+
+
+# -----------------------------------------------------------------------------
+# Compatibilità frontend legacy: tutti gli endpoint /api restituiscono JSON.
+# Evita l'errore JS: Unexpected token '<', quando una pagina HTML 404/405/500
+# viene interpretata come JSON.
+# -----------------------------------------------------------------------------
+@app.errorhandler(404)
+def json_404(e):
+    if request.path.startswith('/api/'):
+        return jsonify({"ok": False, "error": f"Endpoint non trovato: {request.path}"}), 404
+    return e
+
+@app.errorhandler(405)
+def json_405(e):
+    if request.path.startswith('/api/'):
+        return jsonify({"ok": False, "error": f"Metodo non consentito per {request.path}"}), 405
+    return e
+
+@app.errorhandler(500)
+def json_500(e):
+    if request.path.startswith('/api/'):
+        return jsonify({"ok": False, "error": "Errore interno del server", "detail": str(e)}), 500
+    return e
+
+
+def aggregate_dashboard(conn: sqlite3.Connection, tid: int) -> Dict[str, Any]:
+    """Dashboard sintetica tenant-aware compatibile con il frontend originario."""
+    p = ai_payload(conn, tid)
+    reports = [dict(r) for r in conn.execute("SELECT * FROM reports WHERE tenant_id=? ORDER BY section", (tid,)).fetchall()]
+    rows = [dict(r) for r in conn.execute("SELECT v.* FROM votes v JOIN reports r ON r.id=v.report_id WHERE v.tenant_id=? ORDER BY v.vote_type,v.votes DESC", (tid,)).fetchall()]
+    mayor_votes: Dict[str, int] = {}
+    list_votes: Dict[str, int] = {}
+    prefs: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        if r["vote_type"] == "sindaco": mayor_votes[r["name"]] = mayor_votes.get(r["name"], 0) + int(r["votes"] or 0)
+        elif r["vote_type"] == "lista": list_votes[r["list_name"]] = list_votes.get(r["list_name"], 0) + int(r["votes"] or 0)
+        elif r["vote_type"] == "preferenza":
+            prefs.setdefault(r["list_name"] or "", {})[r["name"]] = prefs.setdefault(r["list_name"] or "", {}).get(r["name"], 0) + int(r["votes"] or 0)
+    sections = []
+    for r in reports:
+        valid = sum(v for v in mayor_votes.values()) if len(reports) == 1 else None
+        sections.append({
+            "section": r.get("section"), "voters": r.get("voters"),
+            "blank_ballots": r.get("blank_ballots"), "null_ballots": r.get("null_ballots"),
+            "contested_ballots": r.get("contested_ballots"), "closed": bool(r.get("closed")),
+            "closed_at": r.get("closed_at"), "updated_at": r.get("updated_at"),
+        })
+    return {
+        "ok": True,
+        "tenant_id": tid,
+        "summary": p.get("summary", {}),
+        "totals": {"mayors": mayor_votes, "lists": list_votes, "preferences": prefs},
+        "mayor_votes": mayor_votes,
+        "list_votes": list_votes,
+        "preferences": prefs,
+        "sections": sections,
+        "reports": reports,
+        "heatmap": p.get("heatmap", []),
+        "prediction": p.get("prediction", {}),
+        "social_cards": p.get("social_cards", []),
+    }
+
+@app.get("/api/admin/available-modules")
+@admin_required
+def admin_available_modules():
+    u = current_user(); conn = db(); mods = get_user_modules(conn, u); conn.close()
+    out = []
+    for k, v in MODULE_CATALOG.items():
+        out.append({"key": k, **v, "enabled": bool(mods.get(k, False))})
+    return jsonify({"ok": True, "modules": out})
+
+@app.get("/api/admin/payment-info")
+@admin_required
+def admin_payment_info():
+    tid = tenant_query_id(); conn = db(); t = conn.execute("SELECT * FROM tenants WHERE id=?", (tid,)).fetchone(); plan = get_tenant_settings(conn, tid).get("sales_plan_json", "{}"); conn.close()
+    return jsonify({"ok": True, "tenant": dict(t) if t else {}, "sales_plan": safe_json_loads(plan, {})})
+
+@app.get("/api/modules")
+@admin_required
+def modules_get():
+    u = current_user(); conn = db(); mods = get_user_modules(conn, u); conn.close()
+    rows = [{"key": k, **v, "enabled": bool(mods.get(k, False))} for k, v in MODULE_CATALOG.items()]
+    return jsonify({"ok": True, "modules": rows})
+
+@app.get("/api/dashboard")
+@admin_required
+def dashboard_api():
+    tid = tenant_query_id(); conn = db(); data = aggregate_dashboard(conn, tid); conn.close(); return jsonify(data)
+
+@app.get("/api/section-details")
+@admin_required
+def section_details_api():
+    tid = tenant_query_id(); conn = db(); data = aggregate_dashboard(conn, tid); conn.close()
+    return jsonify({"ok": True, "sections": data.get("sections", []), "reports": data.get("reports", []), "heatmap": data.get("heatmap", [])})
+
+@app.get("/api/export.csv")
+@admin_required
+def export_csv_api():
+    tid = tenant_query_id(); conn = db(); rows = conn.execute("SELECT section,voters,blank_ballots,null_ballots,contested_ballots,closed,updated_at FROM reports WHERE tenant_id=? ORDER BY section", (tid,)).fetchall(); conn.close()
+    out = io.StringIO(); w = csv.writer(out, delimiter=';')
+    w.writerow(["Sezione", "Votanti", "Bianche", "Nulle", "Contestate", "Chiusa", "Aggiornato"])
+    for r in rows: w.writerow([r["section"], r["voters"], r["blank_ballots"], r["null_ballots"], r["contested_ballots"], r["closed"], r["updated_at"]])
+    return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=export_risultati.csv"})
+
+@app.patch("/api/users/<int:user_id>")
+@admin_required
+def update_user_api(user_id: int):
+    u = current_user(); tid = tenant_query_id(); d = request.get_json(force=True)
+    conn = db(); target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not target: conn.close(); return jsonify({"ok": False, "error": "Utente non trovato"}), 404
+    if u["role"] != "superadmin" and target["tenant_id"] != tid: conn.close(); return jsonify({"ok": False, "error": "Utente fuori tenant"}), 403
+    fields = [] ; vals = []
+    for key in ["name", "phone", "section", "role", "allowed_lists"]:
+        if key in d:
+            fields.append(f"{key}=?"); vals.append(d.get(key))
+    if "pin" in d and d.get("pin"):
+        fields.append("pin_hash=?"); vals.append(generate_password_hash(str(d.get("pin"))))
+    if "active" in d:
+        fields.append("active=?"); vals.append(1 if d.get("active") else 0)
+    if not fields: conn.close(); return jsonify({"ok": True, "message": "Nessuna modifica"})
+    vals.append(user_id); conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", vals)
+    audit(conn, tid, u["id"], "update_user", "users", {"user_id": user_id}); conn.commit(); conn.close(); return jsonify({"ok": True})
+
+@app.delete("/api/users/<int:user_id>")
+@admin_required
+def delete_user_api(user_id: int):
+    u = current_user(); tid = tenant_query_id(); conn = db(); target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not target: conn.close(); return jsonify({"ok": False, "error": "Utente non trovato"}), 404
+    if u["role"] != "superadmin" and target["tenant_id"] != tid: conn.close(); return jsonify({"ok": False, "error": "Utente fuori tenant"}), 403
+    conn.execute("DELETE FROM users WHERE id=?", (user_id,)); audit(conn, tid, u["id"], "delete_user", "users", {"user_id": user_id}); conn.commit(); conn.close(); return jsonify({"ok": True})
+
+@app.patch("/api/users/<int:user_id>/toggle")
+@admin_required
+def toggle_user_api(user_id: int):
+    u = current_user(); tid = tenant_query_id(); conn = db(); target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not target: conn.close(); return jsonify({"ok": False, "error": "Utente non trovato"}), 404
+    if u["role"] != "superadmin" and target["tenant_id"] != tid: conn.close(); return jsonify({"ok": False, "error": "Utente fuori tenant"}), 403
+    conn.execute("UPDATE users SET active=? WHERE id=?", (0 if target["active"] else 1, user_id)); conn.commit(); conn.close(); return jsonify({"ok": True})
+
+@app.post("/api/reopen-section")
+@admin_required
+def reopen_section_api():
+    tid = tenant_query_id(); section = str(request.get_json(force=True).get("section", "")).strip()
+    if not section: return jsonify({"ok": False, "error": "Sezione obbligatoria"}), 400
+    conn = db(); conn.execute("UPDATE reports SET closed=0, closed_at=NULL, updated_at=? WHERE tenant_id=? AND section=?", (now(), tid, section)); audit(conn, tid, current_user()["id"], "reopen_section", "reports", {"section": section}); conn.commit(); conn.close(); return jsonify({"ok": True})
+
+@app.post("/api/users/import-csv")
+@admin_required
+def import_users_csv_api():
+    tid = tenant_query_id(); f = request.files.get("file")
+    if not f: return jsonify({"ok": False, "error": "File CSV mancante"}), 400
+    text = f.read().decode("utf-8-sig", errors="ignore"); reader = csv.DictReader(io.StringIO(text), delimiter=';')
+    created = 0; conn = db()
+    for row in reader:
+        name = (row.get("name") or row.get("Nome") or row.get("nome") or row.get("Nominativo") or "").strip()
+        phone = (row.get("phone") or row.get("Telefono") or row.get("telefono") or row.get("Codice") or row.get("codice") or "").strip()
+        pin = (row.get("pin") or row.get("PIN") or "1111").strip()
+        section = (row.get("section") or row.get("Sezione") or row.get("sezione") or "").strip()
+        role = (row.get("role") or row.get("Ruolo") or row.get("ruolo") or "rilevatore").strip()
+        if not name or not phone: continue
+        conn.execute("INSERT INTO users(tenant_id,name,phone,pin_hash,qr_token,role,section,allowed_lists,active,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)", (tid, name, phone, generate_password_hash(pin), secrets.token_urlsafe(24), role, section, "", now()))
+        created += 1
+    conn.commit(); conn.close(); return jsonify({"ok": True, "created": created, "message": f"Importati {created} utenti"})
+
+@app.post("/api/sections/import-csv")
+@admin_required
+def import_sections_csv_api():
+    # Per compatibilità: salva l'elenco sezioni come configurazione tenant.
+    tid = tenant_query_id(); f = request.files.get("file")
+    if not f: return jsonify({"ok": False, "error": "File CSV mancante"}), 400
+    text = f.read().decode("utf-8-sig", errors="ignore"); reader = csv.reader(io.StringIO(text), delimiter=';')
+    sections = []
+    for row in reader:
+        if row and row[0].strip().lower() not in ("sezione", "section"):
+            sections.append(row[0].strip())
+    conn = db(); conn.execute("INSERT OR REPLACE INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)", (tid, "sections_json", json.dumps(sections, ensure_ascii=False))); conn.commit(); conn.close()
+    return jsonify({"ok": True, "sections": len(sections), "message": f"Importate {len(sections)} sezioni"})
+
 # Public API v1
 @app.get("/api/v1/tenant")
 @api_auth("read")
@@ -865,20 +1044,29 @@ def api_write_report():
 @module_required("blockchain")
 def blockchain_api():
     tid=tenant_query_id(); conn=db(); rows=conn.execute("SELECT * FROM audit_log WHERE tenant_id=? ORDER BY id DESC LIMIT 100",(tid,)).fetchall(); chain=[]; prev="0"
-    for r in reversed(rows):
-        block_hash=hashlib.sha256(f"{prev}|{r['id']}|{r['payload_hash']}|{r['created_at']}".encode()).hexdigest(); chain.append({"id":r["id"],"action":r["action"],"resource":r["resource"],"created_at":r["created_at"],"prev_hash":prev,"hash":block_hash}); prev=block_hash
-    conn.close(); return jsonify({"ok":True,"tenant_id":tid,"chain":chain,"note":"Hash chain tenant-aware per audit interno"})
+    for i, r in enumerate(reversed(rows), 1):
+        block_hash=hashlib.sha256(f"{prev}|{r['id']}|{r['payload_hash']}|{r['created_at']}".encode()).hexdigest()
+        chain.append({"index": i, "id":r["id"], "section":"tenant", "representative": r["user_id"], "data_hash": r["payload_hash"], "previous_hash": prev, "block_hash": block_hash, "status":"validato", "action":r["action"],"resource":r["resource"],"created_at":r["created_at"]}); prev=block_hash
+    conn.close(); return jsonify({"ok":True,"tenant_id":tid,"chain":chain,"last_hash":prev,"nft_badges":[{"name":"Audit Trail Verified","trigger":"dati salvati e tracciati","utility":"certificazione interna"}],"dao":{"enabled":True,"governance":"Registro decisionale interno del tenant", "roles":["SuperAdmin","Admin","Rilevatore"], "proposal_types":["Riapertura seggio","Verifica dati","Esportazione report"]},"note":"Hash chain tenant-aware per audit interno"})
 @app.get("/api/osint")
 @admin_required
 @module_required("osint")
-def osint_api(): return jsonify({"ok":True,"signals":[],"message":"Modulo predisposto: inserire fonti OSINT pubbliche e policy privacy prima del crawling automatico."})
-@app.get("/api/simulator")
+def osint_api():
+    return jsonify({"ok":True,"disclaimer":"Modulo OSINT predisposto per sole fonti pubbliche e trattamento conforme a privacy/GDPR.","sources":[{"name":"Albi e atti pubblici","use":"verifica attività amministrativa"},{"name":"Social pubblici","use":"sentiment e reputazione, senza dati sensibili"},{"name":"Media locali","use":"rassegna stampa e alert"}],"alerts":[],"signals":[],"message":"Modulo predisposto: inserire fonti OSINT pubbliche e policy privacy prima del crawling automatico."})
+@app.route("/api/simulator", methods=["GET", "POST"])
 @admin_required
 @module_required("simulator")
 def simulator_api():
-    tid=tenant_query_id(); swing=float(request.args.get("swing",0) or 0); conn=db(); p=ai_payload(conn,tid); conn.close(); lists=[]
-    for x in p["prediction"]["lists"]: lists.append({**x,"scenario_projected":round(x["projected"]*(1+swing/100))})
-    return jsonify({"ok":True,"swing_pct":swing,"lists":lists})
+    tid=tenant_query_id(); payload = request.get_json(silent=True) or {}
+    swing=float(payload.get("list_swing", request.args.get("swing",0)) or 0); turnout=float(payload.get("turnout_delta",0) or 0)
+    conn=db(); p=ai_payload(conn,tid); conn.close()
+    mayors=[]
+    for x in p["prediction"].get("mayors",[]):
+        base=int(x.get("projected",0)); mayors.append({**x,"simulated":max(0, round(base*(1+turnout/100)))})
+    lists=[]
+    for x in p["prediction"].get("lists",[]):
+        base=int(x.get("projected",0)); lists.append({**x,"simulated":max(0, round(base*(1+swing/100)*(1+turnout/100))),"scenario_projected":max(0, round(base*(1+swing/100)))})
+    return jsonify({"ok":True,"swing_pct":swing,"turnout_delta":turnout,"note":"Simulazione tenant-aware basata sulle proiezioni correnti.","mayors":mayors,"lists":lists})
 
 if __name__ == "__main__":
     init_db(); app.run(debug=True)
