@@ -1,5 +1,5 @@
 """
-Focus360 Political Intelligence - Multitenant Edition
+Political Intelligence Platform - Multitenant Edition
 ====================================================
 Reingegnerizzazione SaaS reale della precedente piattaforma elettorale.
 
@@ -55,7 +55,7 @@ DEFAULT_ELECTION_DATA = {"mayors": [], "lists": {}}
 
 SALES_VERSION_CATALOG = {
     "starter": {
-        "name": "Focus360 Political START",
+        "name": "Political Intelligence Platform START",
         "target": "liste civiche, singoli candidati, piccole campagne comunali",
         "positioning": "Raccolta dati ordinata e dashboard essenziale: sostituisce WhatsApp, Excel e telefonate.",
         "monthly_price": 149,
@@ -71,7 +71,7 @@ SALES_VERSION_CATALOG = {
         "sales_argument": "Prezzo accessibile, adatto a chi vuole controllo immediato dello scrutinio senza funzioni complesse."
     },
     "professional": {
-        "name": "Focus360 Political PRO",
+        "name": "Political Intelligence Platform PRO",
         "target": "coalizioni, candidati sindaco strutturati, comitati con più liste",
         "positioning": "Intelligence elettorale concreta: analisi predittiva, peso politico, audit e API per integrazioni.",
         "monthly_price": 399,
@@ -88,7 +88,7 @@ SALES_VERSION_CATALOG = {
         "sales_argument": "È il piano consigliato: trasforma la raccolta voti in supporto decisionale e giustifica un salto di prezzo chiaro."
     },
     "enterprise": {
-        "name": "Focus360 Political ENTERPRISE",
+        "name": "Political Intelligence Platform ENTERPRISE",
         "target": "partiti, federazioni provinciali/regionali, grandi organizzazioni politiche",
         "positioning": "Piattaforma completa multi-organizzazione con OSINT, AI avanzata, API estese e governance commerciale.",
         "monthly_price": 990,
@@ -775,7 +775,7 @@ def create_tenant():
 def create_admin_super():
     data=request.get_json(force=True); tenant_id=data.get("tenant_id")
     if not tenant_id:
-        # crea tenant automaticamente dai dati commerciali, stile Focus360AI
+        # crea tenant automaticamente dai dati commerciali, stile Political Intelligence Platform
         res_data={"name":data.get("organization") or data.get("name") or "Organizzazione politica", "place":data.get("place"),"cap":data.get("cap"),"province":data.get("province"),"region":data.get("region"),"plan":data.get("plan","trial")}
         conn=db(); slug=slugify(res_data["name"]); conn.execute("INSERT INTO tenants(name,slug,place,cap,province,region,plan,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(res_data["name"],slug,res_data.get("place"),res_data.get("cap"),res_data.get("province"),res_data.get("region"),res_data.get("plan"),"active",(datetime.now()+timedelta(days=90)).date().isoformat(),now(),now())); tenant_id=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
         apply_sales_plan(conn, tenant_id, res_data.get("plan", "starter"), 12)

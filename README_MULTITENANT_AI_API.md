@@ -1,4 +1,4 @@
-# Focus360 Political Intelligence - Multitenant AI/API Edition
+# Political Intelligence Platform Intelligence - Multitenant AI/API Edition
 
 Questa versione supera i limiti della precedente webapp elettorale introducendo un modello SaaS multitenant reale.
 
@@ -25,7 +25,7 @@ Ogni organizzazione politica è un tenant autonomo. Le tabelle operative includo
 
 Questo impedisce a un admin di leggere o modificare dati di un altro tenant. Il SuperAdmin può invece creare tenant, admin, moduli e API key.
 
-### 2. SuperAdmin stile Focus360AI
+### 2. SuperAdmin stile Political Intelligence Platform
 
 Il SuperAdmin può:
 

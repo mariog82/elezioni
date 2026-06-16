@@ -4,19 +4,19 @@ La piattaforma contiene una nuova sezione SuperAdmin dedicata alla vendita SaaS 
 
 ## Versioni previste
 
-### 1. Focus360 Political START
+### 1. Political Intelligence Platform START
 - Prezzo stimato: 149 €/mese, 1.490 €/anno, setup 490 €.
 - Target: liste civiche, piccoli comitati, singoli candidati.
 - Moduli: dashboard social/base e funzioni operative di rilevazione.
 - Valore: sostituisce WhatsApp, Excel e telefonate durante lo scrutinio.
 
-### 2. Focus360 Political PRO
+### 2. Political Intelligence Platform PRO
 - Prezzo stimato: 399 €/mese, 3.990 €/anno, setup 990 €.
 - Target: coalizioni, candidati sindaco strutturati, comitati con più liste.
 - Moduli: Political Intelligence AI, Dashboard Social, Electoral Audit, Simulatore predittivo, API pubbliche.
 - Valore: trasforma la raccolta dei voti in analisi strategica e supporto decisionale.
 
-### 3. Focus360 Political ENTERPRISE
+### 3. Political Intelligence Platform ENTERPRISE
 - Prezzo stimato: 990 €/mese, 9.900 €/anno, setup 2.500 €.
 - Target: partiti, federazioni provinciali/regionali, grandi organizzazioni politiche.
 - Moduli: tutti i moduli, incluso OSINT politico.
