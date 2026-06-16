@@ -1,230 +1,127 @@
 """
-Political Intelligence Platform - backend Flask
-================================================
+Focus360 Political Intelligence - Multitenant Edition
+====================================================
+Reingegnerizzazione SaaS reale della precedente piattaforma elettorale.
 
-Il file app.py contiene il backend principale della piattaforma.
-Le sezioni sono organizzate in modo modulare:
+Caratteristiche principali:
+- SuperAdmin di piattaforma: crea tenant/organizzazioni politiche, admin, moduli, piani, scadenze e API key.
+- Multitenancy applicativo: ogni tabella operativa contiene tenant_id; utenti, dati elettorali, voti, report e configurazioni sono isolati.
+- Compatibilità UI esistente: mantiene gli endpoint /api/... già usati dal frontend, ma li filtra sempre sul tenant corrente.
+- API pubbliche versionate: /api/v1/... con autenticazione Bearer tramite API key di tenant.
+- Moduli AI reali: statistiche descrittive, proiezione Bayes/Laplace, regressione lineare per turnout e predizione voti, clustering euristico territoriale, alert anomalie.
 
-1. Configurazione generale e database SQLite.
-2. Anagrafica elettorale vuota e caricabile da CSV.
-3. Autenticazione utenti/admin/rappresentanti.
-4. API operative per inserimento voti, quadratura e voto disgiunto.
-5. API admin per importazioni CSV, utenti, impostazioni e reset.
-6. Moduli premium attivabili: Intelligence, Social, Blockchain, OSINT, Simulatore.
-7. Endpoint pubblici aggregati per dashboard condivisibili.
-
-Scelta progettuale v65:
-- non ci sono più sindaci/liste precaricati;
-- l'admin deve importare prima le anagrafiche;
-- se l'anagrafica manca, il backend blocca inserimento voti e moduli analitici.
-
-Nota produzione:
-SQLite è adatto a demo/prototipo. Per uso reale preferire PostgreSQL,
-backup automatici, logging, HTTPS, rate limit e gestione segreti via variabili ambiente.
+Nota produzione: SQLite resta supportato per demo e piccoli clienti. Per decine/centinaia di tenant usare DATABASE_URL PostgreSQL,
+processi worker separati, HTTPS, rate limit e backup automatici.
 """
 
-import unicodedata
+from __future__ import annotations
+
 import csv
-import re
+import hashlib
+import hmac
 import io
 import json
-
-from flask import Flask, request, jsonify, send_from_directory, session, Response, redirect
-from werkzeug.security import generate_password_hash, check_password_hash
+import math
+import os
+import secrets
+import sqlite3
+from datetime import datetime, timedelta
 from functools import wraps
-from datetime import datetime
-import sqlite3, os, secrets, math, hashlib
+from typing import Any, Dict, List, Optional, Tuple
+
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
+from werkzeug.security import check_password_hash, generate_password_hash
+
+try:
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression
+    SKLEARN_AVAILABLE = True
+except Exception:  # fallback per ambienti minimi
+    np = None
+    KMeans = None
+    RandomForestRegressor = None
+    LinearRegression = None
+    SKLEARN_AVAILABLE = False
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(APP_DIR, "database.sqlite")
+DB_PATH = os.environ.get("DATABASE_SQLITE_PATH", os.path.join(APP_DIR, "database.sqlite"))
 STATIC_DIR = os.path.join(APP_DIR, "static")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 app.secret_key = os.environ.get("APP_SECRET_KEY", secrets.token_hex(32))
 
-# -----------------------------------------------------------------------------
-# ANAGRAFICA ELETTORALE INIZIALE
-# -----------------------------------------------------------------------------
-# La piattaforma parte volutamente VUOTA.
-# Motivo operativo: grafici, inserimento voti, importazioni per sezione,
-# simulazioni e moduli premium devono basarsi su anagrafiche caricate
-# dall'amministratore, non su candidati precompilati o dati dimostrativi.
-# Prima di usare l'app bisogna quindi importare, in ordine:
-#   1. candidati sindaco: Numero Sindaco;Candidato Sindaco
-#   2. liste/coalizioni/consiglieri: Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato
-# I dati vengono poi salvati in settings.election_data_json.
-ELECTION_DATA = {
-    "mayors": [],
-    "lists": {}
-}
-
-# Flag di migrazione: svuota una sola volta eventuali dati dimostrativi
-# presenti in una vecchia installazione v64. Dopo l'import reale, il flag
-# resta impostato e i dati amministrativi non vengono più cancellati.
-ANAGRAPHICS_EMPTY_VERSION_KEY = "initial_anagraphics_cleared_v65"
-
-
-def load_election_data_from_settings():
-    """Carica eventuali liste/candidati personalizzati salvati dall'amministratore."""
-    global ELECTION_DATA
-    try:
-        if not os.path.exists(DB_PATH):
-            return
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("SELECT value FROM settings WHERE key='election_data_json'").fetchone()
-        conn.close()
-        if row and row[0]:
-            data = json.loads(row[0])
-            if isinstance(data, dict) and isinstance(data.get('mayors'), list) and isinstance(data.get('lists'), dict):
-                ELECTION_DATA = data
-    except Exception:
-        pass
-
-def _allowed_lists_from_user(user):
-    raw = ''
-    try:
-        raw = user['allowed_lists'] or ''
-    except Exception:
-        raw = ''
-    if not raw:
-        return []
-    return [x.strip() for x in raw.split('|') if x.strip()]
-
-def election_data_for_user(user):
-    if not user or str(user['role']).lower() == 'admin':
-        return ELECTION_DATA
-    allowed = _allowed_lists_from_user(user)
-    if not allowed:
-        return ELECTION_DATA
-    lists = {k:v for k,v in ELECTION_DATA['lists'].items() if k in allowed}
-    mayors = sorted(set(ELECTION_DATA['mayors']) | {v.get('coalition') for v in lists.values() if v.get('coalition')})
-    return {'mayors': mayors, 'lists': lists}
-
-def _safe_split_votes(value):
-    # Normalizza il campo split_votes_json: può arrivare come lista Python,
-    # stringa JSON o valore mancante. La funzione evita crash lato API.
-    if isinstance(value, list):
-        return value
-    try:
-        return json.loads(value or '[]')
-    except Exception:
-        return []
-
-
-def anagraphics_loaded():
-    """
-    Verifica prerequisito minimo della piattaforma.
-    La webapp consente grafici e inserimento voti solo se l'admin ha caricato
-    almeno un candidato sindaco e almeno una lista con candidati consiglieri.
-    """
-    return bool(ELECTION_DATA.get("mayors")) and bool(ELECTION_DATA.get("lists")) and any(len(v.get("candidates", [])) for v in ELECTION_DATA.get("lists", {}).values())
-
-
-def anagraphics_status_payload():
-    """Payload unico, riusato da frontend e API, per spiegare cosa manca."""
-    lists = ELECTION_DATA.get("lists", {})
-    candidate_count = sum(len(v.get("candidates", [])) for v in lists.values())
-    return {
-        "loaded": anagraphics_loaded(),
-        "mayors_count": len(ELECTION_DATA.get("mayors", [])),
-        "lists_count": len(lists),
-        "candidates_count": candidate_count,
-        "required_order": [
-            "Importazione prioritaria sindaci: Numero Sindaco;Candidato Sindaco",
-            "Importazione prioritaria consiglieri/liste: Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato",
-            "Solo dopo: voti sindaci, voti liste, preferenze, sezioni, grafici e moduli premium"
-        ],
-        "message": "Caricare prima candidati sindaco e consiglieri/lista/coalizione per abilitare inserimento voti, grafici e moduli premium."
-    }
-
-
 MODULE_CATALOG = {
-    "intelligence": {"title": "Political Intelligence Platform", "area": "Premium", "path": "/admin/intelligence", "description": "Heatmap territoriale, reti body politico, predizione AI-like e peso politico reale."},
-    "social": {"title": "Funzionalità social virali", "area": "Growth", "path": "/admin/social", "description": "Dashboard pubbliche condivisibili, card virali e Political Score."},
-    "blockchain": {"title": "Blockchain Electoral Audit, DAO e NFT", "area": "Trust/Web3", "path": "/admin/blockchain", "description": "Audit hash dei dati, registro simulato, DAO civica e gamification NFT elettorali."},
-    "osint": {"title": "Modulo investigativo / OSINT politico", "area": "Investigativo", "path": "/admin/osint", "description": "Raccolta fonti aperte, segnali reputazionali, alert territoriali e schede candidate/liste."},
-    "simulator": {"title": "Simulatore elettorale", "area": "Scenario", "path": "/admin/simulator", "description": "Scenari su affluenza, swing liste/sindaci, seggi e impatto sul peso politico."}
+    "intelligence": {"title": "Political Intelligence AI", "area": "Premium", "path": "/admin/intelligence", "description": "Heatmap, regressione, clustering, anomalie e peso politico."},
+    "social": {"title": "Dashboard social", "area": "Growth", "path": "/admin/social", "description": "Card pubbliche e sintesi condivisibili."},
+    "blockchain": {"title": "Electoral Audit", "area": "Trust", "path": "/admin/blockchain", "description": "Hash chain tenant-aware e registro audit."},
+    "osint": {"title": "OSINT politico", "area": "Investigativo", "path": "/admin/osint", "description": "Dossier, fonti aperte e alert reputazionali."},
+    "simulator": {"title": "Simulatore predittivo", "area": "Scenario", "path": "/admin/simulator", "description": "Swing, scenari affluenza e proiezioni."},
 }
-DEFAULT_MODULES = {key: True for key in MODULE_CATALOG}
+DEFAULT_MODULES = {k: True for k in MODULE_CATALOG}
+DEFAULT_ELECTION_DATA = {"mayors": [], "lists": {}}
 
-def get_module_config(conn):
-    row = conn.execute("SELECT value FROM settings WHERE key='module_config_json'").fetchone()
-    try:
-        data = json.loads(row["value"]) if row else {}
-    except Exception:
-        data = {}
-    return {key: bool(data.get(key, DEFAULT_MODULES.get(key, True))) for key in MODULE_CATALOG}
 
-def save_module_config(conn, data):
-    clean = {key: bool(data.get(key, False)) for key in MODULE_CATALOG}
-    conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('module_config_json', ?)", (json.dumps(clean),))
-    return clean
+def now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
-def module_enabled(key):
-    conn = db(); cfg = get_module_config(conn); conn.close()
-    return cfg.get(key, False)
 
-def get_admin_module_permissions(conn, user_id):
-    """Restituisce i moduli visibili per uno specifico Admin.
-
-    Regola operativa:
-    - Super Utente: vede sempre tutti i moduli globalmente attivi.
-    - Admin: vede solo i moduli globalmente attivi E assegnati dal Super Utente.
-    - Se un Admin non ha ancora righe di permesso, per compatibilità iniziale
-      vengono considerati assegnati tutti i moduli globalmente attivi; appena il
-      Super Utente salva una configurazione, valgono solo le scelte salvate.
-    """
-    global_cfg = get_module_config(conn)
-    rows = conn.execute("SELECT module_key, enabled FROM admin_module_permissions WHERE user_id=?", (user_id,)).fetchall()
-    if not rows:
-        return {key: bool(global_cfg.get(key, False)) for key in MODULE_CATALOG}
-    assigned = {r["module_key"]: bool(r["enabled"]) for r in rows}
-    return {key: bool(global_cfg.get(key, False)) and bool(assigned.get(key, False)) for key in MODULE_CATALOG}
-
-def save_admin_module_permissions(conn, user_id, modules):
-    """Salva l'associazione moduli->Admin effettuata dal Super Utente."""
-    now = datetime.now().isoformat(timespec="seconds")
-    clean = {}
-    for key in MODULE_CATALOG:
-        enabled = int(bool(modules.get(key, False)))
-        clean[key] = bool(enabled)
-        conn.execute("""
-            INSERT OR REPLACE INTO admin_module_permissions(user_id, module_key, enabled, updated_at)
-            VALUES(?,?,?,?)
-        """, (user_id, key, enabled, now))
-    return clean
-
-def current_user_module_enabled(key):
-    """Controlla se il modulo è accessibile dall'utente loggato."""
-    user = current_user()
-    if not user:
-        return False
-    role = str(user["role"]).lower()
-    conn = db()
-    if role == "superadmin":
-        allowed = get_module_config(conn).get(key, False)
-    elif role == "admin":
-        allowed = get_admin_module_permissions(conn, user["id"]).get(key, False)
-    else:
-        allowed = False
-    conn.close()
-    return bool(allowed)
-
-def fast_pin_hash(pin):
-    # Import CSV: hashing volutamente leggero per evitare timeout su Render.
-    # check_password_hash resta compatibile con questo formato Werkzeug.
-    return generate_password_hash(str(pin), method="pbkdf2:sha256:1", salt_length=4)
-
-def db():
+def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
-def init_db():
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS users (
+
+def safe_json_loads(raw: Any, default: Any) -> Any:
+    if raw is None:
+        return default
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def slugify(text: str) -> str:
+    base = "".join(ch.lower() if ch.isalnum() else "-" for ch in text.strip())
+    base = "-".join(part for part in base.split("-") if part)
+    return base or secrets.token_hex(3)
+
+
+def hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def table_cols(conn: sqlite3.Connection, table: str) -> List[str]:
+    return [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def add_col(conn: sqlite3.Connection, table: str, col: str, sql_type: str, default_sql: str = "") -> None:
+    if col not in table_cols(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type} {default_sql}")
+
+
+def init_db() -> None:
+    conn = db(); c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS tenants(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        organization_type TEXT DEFAULT 'organizzazione politica',
+        place TEXT, cap TEXT, province TEXT, region TEXT,
+        plan TEXT DEFAULT 'trial',
+        status TEXT DEFAULT 'active',
+        expires_at TEXT,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER,
         name TEXT NOT NULL,
         phone TEXT NOT NULL UNIQUE,
         pin_hash TEXT NOT NULL,
@@ -233,52 +130,53 @@ def init_db():
         section TEXT,
         allowed_lists TEXT,
         active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
     )""")
-    # v73 - profili commerciali/territoriali degli amministratori clienti.
-    # Il super utente li compila per sapere chi utilizza la piattaforma,
-    # in quale territorio opera e per quali beneficiari viene acquistata/usata.
-    cur.execute("""CREATE TABLE IF NOT EXISTS admin_profiles (
-        user_id INTEGER PRIMARY KEY,
-        organization TEXT,
-        place TEXT,
-        cap TEXT,
-        province TEXT,
-        region TEXT,
-        usage_reason TEXT,
-        beneficiaries TEXT,
-        notes TEXT,
+    # migrazioni su vecchie installazioni
+    for col, typ in [("tenant_id", "INTEGER"), ("allowed_lists", "TEXT")]:
+        add_col(conn, "users", col, typ)
+
+    c.execute("""CREATE TABLE IF NOT EXISTS tenant_settings(
+        tenant_id INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY(tenant_id,key),
+        FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS tenant_modules(
+        tenant_id INTEGER NOT NULL,
+        module_key TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        expires_at TEXT,
         updated_at TEXT,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        PRIMARY KEY(tenant_id,module_key),
+        FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
     )""")
-    # v73 - configurazione metodi di pagamento. Non salva segreti reali in chiaro
-    # in produzione: qui vengono registrati provider, stato e chiavi pubbliche/test.
-    # I secret reali vanno configurati come variabili d'ambiente su Render/server.
-    cur.execute("""CREATE TABLE IF NOT EXISTS payment_methods (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        provider TEXT NOT NULL,
-        enabled INTEGER NOT NULL DEFAULT 0,
-        mode TEXT NOT NULL DEFAULT 'test',
-        public_key TEXT,
-        webhook_url TEXT,
-        notes TEXT,
-        updated_at TEXT
-    )""")
-    # v74 - permessi granulari dei moduli per singolo Admin.
-    # Il Super Utente decide quali moduli premium compaiono e sono utilizzabili
-    # da ciascun account Admin cliente. Se un modulo non è abilitato qui, non
-    # deve comparire nei pulsanti dell'area Admin e le API/pagine dedicate sono bloccate.
-    cur.execute("""CREATE TABLE IF NOT EXISTS admin_module_permissions (
+    c.execute("""CREATE TABLE IF NOT EXISTS admin_module_permissions(
         user_id INTEGER NOT NULL,
         module_key TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT,
-        PRIMARY KEY(user_id, module_key),
+        PRIMARY KEY(user_id,module_key),
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS reports (
+    c.execute("""CREATE TABLE IF NOT EXISTS api_keys(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
+        tenant_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        prefix TEXT NOT NULL,
+        scopes TEXT NOT NULL DEFAULT 'read',
+        active INTEGER NOT NULL DEFAULT 1,
+        last_used_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS reports(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL,
+        user_id INTEGER,
         section TEXT NOT NULL,
         voters INTEGER NOT NULL DEFAULT 0,
         blank_ballots INTEGER NOT NULL DEFAULT 0,
@@ -289,186 +187,140 @@ def init_db():
         closed_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS votes (
+    add_col(conn, "reports", "tenant_id", "INTEGER", "DEFAULT 1")
+    for col, typ, default in [("voters","INTEGER","DEFAULT 0"),("blank_ballots","INTEGER","DEFAULT 0"),("null_ballots","INTEGER","DEFAULT 0"),("contested_ballots","INTEGER","DEFAULT 0"),("split_votes_json","TEXT","DEFAULT '[]'"),("closed","INTEGER","DEFAULT 0"),("closed_at","TEXT","")]:
+        add_col(conn, "reports", col, typ, default)
+
+    c.execute("""CREATE TABLE IF NOT EXISTS votes(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL,
         report_id INTEGER NOT NULL,
         vote_type TEXT NOT NULL,
         list_name TEXT,
         name TEXT NOT NULL,
         votes INTEGER NOT NULL DEFAULT 0,
-        FOREIGN KEY(report_id) REFERENCES reports(id)
+        FOREIGN KEY(tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+        FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE
+    )""")
+    add_col(conn, "votes", "tenant_id", "INTEGER", "DEFAULT 1")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS audit_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER,
+        user_id INTEGER,
+        action TEXT NOT NULL,
+        resource TEXT,
+        payload_hash TEXT,
+        created_at TEXT NOT NULL
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS payment_methods(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        mode TEXT NOT NULL DEFAULT 'test',
+        public_key TEXT,
+        webhook_url TEXT,
+        notes TEXT,
+        updated_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS admin_profiles(
+        user_id INTEGER PRIMARY KEY,
+        organization TEXT, place TEXT, cap TEXT, province TEXT, region TEXT,
+        usage_reason TEXT, beneficiaries TEXT, notes TEXT, updated_at TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
 
-    user_cols = [row["name"] for row in cur.execute("PRAGMA table_info(users)").fetchall()]
-    if "allowed_lists" not in user_cols:
-        cur.execute("ALTER TABLE users ADD COLUMN allowed_lists TEXT")
+    # default tenant + superadmin
+    if not c.execute("SELECT id FROM tenants WHERE slug='platform-demo'").fetchone():
+        c.execute("INSERT INTO tenants(name,slug,place,province,region,plan,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  ("Tenant Demo Piattaforma", "platform-demo", "Barcellona Pozzo di Gotto", "ME", "Sicilia", "enterprise", "active", (datetime.now()+timedelta(days=365)).date().isoformat(), now(), now()))
+    demo_tenant = c.execute("SELECT id FROM tenants WHERE slug='platform-demo'").fetchone()["id"]
 
-    report_cols = [row["name"] for row in cur.execute("PRAGMA table_info(reports)").fetchall()]
-    migrations = {
-        "voters": "ALTER TABLE reports ADD COLUMN voters INTEGER NOT NULL DEFAULT 0",
-        "blank_ballots": "ALTER TABLE reports ADD COLUMN blank_ballots INTEGER NOT NULL DEFAULT 0",
-        "null_ballots": "ALTER TABLE reports ADD COLUMN null_ballots INTEGER NOT NULL DEFAULT 0",
-        "contested_ballots": "ALTER TABLE reports ADD COLUMN contested_ballots INTEGER NOT NULL DEFAULT 0",
-        "split_votes_json": "ALTER TABLE reports ADD COLUMN split_votes_json TEXT NOT NULL DEFAULT '[]'",
-        "closed": "ALTER TABLE reports ADD COLUMN closed INTEGER NOT NULL DEFAULT 0",
-        "closed_at": "ALTER TABLE reports ADD COLUMN closed_at TEXT"
-    }
-    for col, sql in migrations.items():
-        if col not in report_cols:
-            cur.execute(sql)
+    # assegna a demo vecchi record senza tenant
+    c.execute("UPDATE users SET tenant_id=? WHERE tenant_id IS NULL AND role!='superadmin'", (demo_tenant,))
+    c.execute("UPDATE reports SET tenant_id=? WHERE tenant_id IS NULL", (demo_tenant,))
+    c.execute("UPDATE votes SET tenant_id=? WHERE tenant_id IS NULL", (demo_tenant,))
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-    )""")
+    if not c.execute("SELECT id FROM users WHERE phone='super'").fetchone():
+        c.execute("INSERT INTO users(tenant_id,name,phone,pin_hash,qr_token,role,section,allowed_lists,active,created_at) VALUES(NULL,?,?,?,?,?,?,?,1,?)",
+                  ("Super Utente Piattaforma", "super", generate_password_hash("0000"), secrets.token_urlsafe(24), "superadmin", None, "", now()))
+    if not c.execute("SELECT id FROM users WHERE phone='admin'").fetchone():
+        c.execute("INSERT INTO users(tenant_id,name,phone,pin_hash,qr_token,role,section,allowed_lists,active,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)",
+                  (demo_tenant, "Admin Tenant Demo", "admin", generate_password_hash("1234"), secrets.token_urlsafe(24), "admin", None, "", now()))
+
+    # settings e moduli tenant
     defaults = {
-        "total_electors": "0",
-        "total_voters": "0",
-        "council_seats": "24",
-        "winner_mayor": "",
-        "mode": "first",
-        "election_data_json": json.dumps(ELECTION_DATA, ensure_ascii=False),
-        "module_config_json": json.dumps(DEFAULT_MODULES, ensure_ascii=False),
-        ANAGRAPHICS_EMPTY_VERSION_KEY: "1"
+        "total_electors": "0", "total_voters": "0", "council_seats": "24", "winner_mayor": "", "mode": "first",
+        "election_data_json": json.dumps(DEFAULT_ELECTION_DATA, ensure_ascii=False),
     }
-    for key, value in defaults.items():
-        cur.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (key, value))
+    for t in c.execute("SELECT id FROM tenants").fetchall():
+        tid = t["id"]
+        for k,v in defaults.items():
+            c.execute("INSERT OR IGNORE INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)", (tid,k,v))
+        for mk,en in DEFAULT_MODULES.items():
+            c.execute("INSERT OR IGNORE INTO tenant_modules(tenant_id,module_key,enabled,updated_at) VALUES(?,?,?,?)", (tid,mk,int(en),now()))
 
-    # Migrazione v65: se si aggiorna una vecchia installazione con nomi
-    # precompilati, l'anagrafica viene svuotata una sola volta.
-    # In questo modo l'admin è obbligato a caricare i CSV reali prima di
-    # visualizzare grafici o inserire voti.
-    already_cleared = cur.execute("SELECT value FROM settings WHERE key=?", (ANAGRAPHICS_EMPTY_VERSION_KEY,)).fetchone()
-    if not already_cleared:
-        cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('election_data_json', ?)", (json.dumps({"mayors": [], "lists": {}}, ensure_ascii=False),))
-        cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('winner_mayor', '')")
-        cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, '1')", (ANAGRAPHICS_EMPTY_VERSION_KEY,))
+    # indici tenant-aware
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_tenant_section ON reports(tenant_id, section)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_votes_tenant_report ON votes(tenant_id, report_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_users_tenant_role ON users(tenant_id, role)")
+    conn.commit(); conn.close()
 
-    cur.execute("SELECT COUNT(*) AS n FROM users")
-    if cur.fetchone()["n"] == 0:
-        now = datetime.now().isoformat(timespec="seconds")
-        demo_users = [
-            ("Super Utente Piattaforma", "super", "0000", "superadmin", None),
-            ("Amministratore Centrale", "admin", "1234", "admin", None),
-            ("Rappresentante Sezione 1", "3330000001", "1111", "rappresentante", "1"),
-            ("Rappresentante Sezione 2", "3330000002", "2222", "rappresentante", "2"),
-        ]
-        for name, phone, pin, role, section in demo_users:
-            cur.execute(
-                "INSERT INTO users(name, phone, pin_hash, qr_token, role, section, active, created_at) VALUES(?,?,?,?,?,?,1,?)",
-                (name, phone, generate_password_hash(pin), secrets.token_urlsafe(24), role, section, now),
-            )
-
-    # v73: garantisce la presenza del super utente anche su installazioni
-    # già popolate, dove il blocco demo iniziale non verrebbe rieseguito.
-    now_super = datetime.now().isoformat(timespec="seconds")
-    cur.execute("INSERT OR IGNORE INTO users(name, phone, pin_hash, qr_token, role, section, allowed_lists, active, created_at) VALUES(?,?,?,?,?,?,?,1,?)",
-        ("Super Utente Piattaforma", "super", generate_password_hash("0000"), secrets.token_urlsafe(24), "superadmin", None, "", now_super))
-
-    # Un solo record logico per sezione/seggio:
-    # primo inserimento = INSERT, salvataggi successivi = UPDATE.
-    cur.execute("""
-        DELETE FROM reports
-        WHERE id NOT IN (
-            SELECT MAX(id)
-            FROM reports
-            GROUP BY section
-        )
-    """)
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_section_unique ON reports(section)")
-
-
-    # Deduplica voti storici: conserva l'ultimo record per report/tipo/lista/nome.
-    cur.execute("""
-        DELETE FROM votes
-        WHERE id NOT IN (
-            SELECT MAX(id)
-            FROM votes
-            GROUP BY report_id, vote_type, COALESCE(list_name,''), name
-        )
-    """)
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_votes_unique_update_import ON votes(report_id, vote_type, COALESCE(list_name,''), name)")
-
-
-    # Deduplica report storici: un solo report per sezione/TOTALE.
-    cur.execute("""
-        DELETE FROM reports
-        WHERE id NOT IN (
-            SELECT MAX(id)
-            FROM reports
-            GROUP BY section
-        )
-    """)
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_section_update_import ON reports(section)")
-
-
-    # Deduplica voti importati: un solo record per report/tipo/lista/nome.
-    cur.execute("""
-        DELETE FROM votes
-        WHERE id NOT IN (
-            SELECT MIN(id)
-            FROM votes
-            GROUP BY report_id, vote_type, COALESCE(list_name,''), name
-        )
-    """)
-    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_votes_update_csv_unique_v56 ON votes(report_id, vote_type, COALESCE(list_name,''), name)")
-
-    conn.commit()
-    conn.close()
 
 @app.before_request
-def ensure_db():
-    # Esegue sempre init_db perché la funzione è idempotente:
-    # crea tabelle mancanti, applica migrazioni leggere e non duplica record.
-    # Questo consente agli aggiornamenti dello ZIP di adeguare anche database
-    # già esistenti su Render/VPS senza interventi manuali.
+def before_request() -> None:
     init_db()
-    load_election_data_from_settings()
 
-def current_user():
-    user_id = session.get("uid")
-    if not user_id:
-        return None
+
+def audit(conn: sqlite3.Connection, tenant_id: Optional[int], user_id: Optional[int], action: str, resource: str, payload: Any = None) -> None:
+    raw = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+    conn.execute("INSERT INTO audit_log(tenant_id,user_id,action,resource,payload_hash,created_at) VALUES(?,?,?,?,?,?)",
+                 (tenant_id, user_id, action, resource, hashlib.sha256(raw.encode()).hexdigest(), now()))
+
+
+def current_user() -> Optional[sqlite3.Row]:
+    uid = session.get("uid")
+    if not uid: return None
+    conn = db(); row = conn.execute("SELECT * FROM users WHERE id=? AND active=1", (uid,)).fetchone(); conn.close(); return row
+
+
+def current_tenant_id() -> Optional[int]:
+    u = current_user()
+    return None if not u else u["tenant_id"]
+
+
+def public_user(u: sqlite3.Row) -> Dict[str, Any]:
+    tenant = None
     conn = db()
-    user = conn.execute("SELECT * FROM users WHERE id=? AND active=1", (user_id,)).fetchone()
+    if u["tenant_id"]:
+        tenant = dict(conn.execute("SELECT * FROM tenants WHERE id=?", (u["tenant_id"],)).fetchone())
+    mods = []
+    if u["role"] == "superadmin":
+        mods = list(MODULE_CATALOG.keys())
+    elif u["role"] == "admin":
+        mods = [k for k,v in get_user_modules(conn, u).items() if v]
     conn.close()
-    return user
+    return {"id":u["id"],"tenant_id":u["tenant_id"],"tenant":tenant,"name":u["name"],"phone":u["phone"],"role":u["role"],"section":u["section"],"is_super":u["role"]=="superadmin","enabled_modules":mods}
 
-def public_user(user):
-    allowed = []
-    try:
-        allowed = _allowed_lists_from_user(user)
-    except Exception:
-        allowed = []
-    enabled_modules = []
-    if str(user["role"]).lower() in ["admin", "superadmin"]:
-        conn = db()
-        if str(user["role"]).lower() == "superadmin":
-            cfg = get_module_config(conn)
-        else:
-            cfg = get_admin_module_permissions(conn, user["id"])
-        conn.close()
-        enabled_modules = [key for key, enabled in cfg.items() if enabled]
-    return {"id": user["id"], "name": user["name"], "phone": user["phone"], "role": user["role"], "section": user["section"], "allowed_lists": allowed, "is_super": str(user["role"]).lower() == "superadmin", "enabled_modules": enabled_modules}
 
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if not current_user():
-            return jsonify({"ok": False, "error": "Accesso non autorizzato"}), 401
+        if not current_user(): return jsonify({"ok":False,"error":"Accesso non autorizzato"}), 401
         return fn(*args, **kwargs)
     return wrapper
+
 
 def admin_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        user = current_user()
-        if not user:
-            return jsonify({"ok": False, "error": "Accesso non autorizzato"}), 401
-        if str(user["role"]).lower() not in ["admin", "superadmin"]:
-            return jsonify({"ok": False, "error": "Funzione riservata all'amministratore"}), 403
+        u=current_user()
+        if not u: return jsonify({"ok":False,"error":"Accesso non autorizzato"}),401
+        if u["role"] not in ("admin","superadmin"): return jsonify({"ok":False,"error":"Funzione riservata all'amministratore"}),403
+        if u["role"]!="superadmin" and tenant_expired(u["tenant_id"]): return jsonify({"ok":False,"error":"Tenant scaduto o disattivato"}),402
         return fn(*args, **kwargs)
     return wrapper
 
@@ -476,2171 +328,429 @@ def admin_required(fn):
 def super_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        user = current_user()
-        if not user:
-            return jsonify({"ok": False, "error": "Accesso non autorizzato"}), 401
-        if str(user["role"]).lower() != "superadmin":
-            return jsonify({"ok": False, "error": "Funzione riservata al super utente"}), 403
+        u=current_user()
+        if not u: return jsonify({"ok":False,"error":"Accesso non autorizzato"}),401
+        if u["role"]!="superadmin": return jsonify({"ok":False,"error":"Funzione riservata al SuperAdmin"}),403
         return fn(*args, **kwargs)
     return wrapper
 
-def get_settings(conn):
-    rows = conn.execute("SELECT key, value FROM settings").fetchall()
-    settings = {r["key"]: r["value"] for r in rows}
-    return {
-        "total_electors": int(settings.get("total_electors", "0") or 0),
-        "total_voters": int(settings.get("total_voters", "0") or 0),
-        "council_seats": int(settings.get("council_seats", "24") or 24),
-        "winner_mayor": settings.get("winner_mayor", ""),
-        "mode": settings.get("mode", "first"),
-    }
 
-def d_hondt(votes, seats):
-    result = {key: 0 for key in votes}
-    quotients = []
-    for key, value in votes.items():
-        for divisor in range(1, seats + 1):
-            quotients.append((value / divisor if divisor else 0, key, value, divisor))
-    quotients.sort(key=lambda item: (-item[0], -item[2], item[1]))
-    for _, key, _, _ in quotients[:seats]:
-        result[key] += 1
-    return result
+def tenant_expired(tid: Optional[int]) -> bool:
+    if not tid: return False
+    conn=db(); t=conn.execute("SELECT status,expires_at FROM tenants WHERE id=?",(tid,)).fetchone(); conn.close()
+    if not t: return True
+    if t["status"] != "active": return True
+    if t["expires_at"]:
+        try: return datetime.fromisoformat(t["expires_at"]).date() < datetime.now().date()
+        except Exception: return False
+    return False
 
-def compute_elected(conn):
-    settings = get_settings(conn)
-    seats = max(1, settings["council_seats"])
-    winner = settings["winner_mayor"]
-    mode = settings["mode"]
-    list_rows = conn.execute("SELECT list_name AS name, SUM(votes) AS total FROM votes WHERE vote_type='lista' GROUP BY list_name").fetchall()
-    pref_rows = conn.execute("SELECT list_name, name, SUM(votes) AS total FROM votes WHERE vote_type='preferenza' GROUP BY list_name, name").fetchall()
-    mayor_rows = conn.execute("SELECT name, SUM(votes) AS total FROM votes WHERE vote_type='sindaco' GROUP BY name").fetchall()
-    mayor_votes = {row["name"]: int(row["total"] or 0) for row in mayor_rows}
-    list_votes = {row["name"]: int(row["total"] or 0) for row in list_rows}
-    total_list_votes = sum(list_votes.values())
-    threshold = total_list_votes * 0.05
-    admitted_lists = {name: votes for name, votes in list_votes.items() if votes > 0 and votes >= threshold}
-    coalition_votes = {}
-    for list_name, votes in admitted_lists.items():
-        coalition = ELECTION_DATA["lists"][list_name]["coalition"]
-        coalition_votes[coalition] = coalition_votes.get(coalition, 0) + votes
-    coalition_seats = d_hondt(coalition_votes, seats) if coalition_votes else {}
-    winner_coal_votes = coalition_votes.get(winner, 0)
-    winner_pct = (winner_coal_votes / total_list_votes * 100) if total_list_votes else 0
-    other_max_pct = max([v / total_list_votes * 100 for c, v in coalition_votes.items() if c != winner] or [0]) if total_list_votes else 0
-    premium_seats = math.ceil(seats * 0.60)
-    natural_winner_seats = coalition_seats.get(winner, 0)
-    premium_applied = natural_winner_seats < premium_seats and other_max_pct <= 50 and (mode == "runoff" or winner_pct >= 40)
-    if premium_applied:
-        coalition_seats[winner] = premium_seats
-        remaining_seats = seats - premium_seats
-        other_coalitions = {coalition: votes for coalition, votes in coalition_votes.items() if coalition != winner}
-        other_seats = d_hondt(other_coalitions, remaining_seats) if other_coalitions and remaining_seats > 0 else {}
-        for coalition in other_coalitions:
-            coalition_seats[coalition] = other_seats.get(coalition, 0)
-    list_seats = {}
-    for coalition, coalition_seat_count in coalition_seats.items():
-        lists_in_coalition = {list_name: votes for list_name, votes in admitted_lists.items() if ELECTION_DATA["lists"][list_name]["coalition"] == coalition}
-        assigned = d_hondt(lists_in_coalition, coalition_seat_count) if lists_in_coalition and coalition_seat_count > 0 else {}
-        list_seats.update(assigned)
-    preferences = {}
-    for row in pref_rows:
-        preferences.setdefault(row["list_name"], {})[row["name"]] = int(row["total"] or 0)
-    elected = {}
-    for list_name, list_obj in ELECTION_DATA["lists"].items():
-        count = list_seats.get(list_name, 0)
-        ranked = []
-        for index, candidate in enumerate(list_obj["candidates"]):
-            ranked.append({"name": candidate, "votes": preferences.get(list_name, {}).get(candidate, 0), "order": index + 1})
-        ranked.sort(key=lambda item: (-item["votes"], item["order"]))
-        elected[list_name] = ranked[:count]
-    losing_mayors = sorted([{"name": name, "votes": mayor_votes.get(name, 0)} for name in ELECTION_DATA["mayors"] if name != winner], key=lambda item: -item["votes"])
-    return {
-        "settings": settings, "mayor_votes": mayor_votes, "list_votes": list_votes,
-        "total_list_votes": total_list_votes, "threshold": threshold,
-        "admitted_lists": admitted_lists, "coalition_votes": coalition_votes,
-        "coalition_seats": coalition_seats, "list_seats": list_seats,
-        "elected": elected, "premium_applied": premium_applied,
-        "premium_seats": premium_seats, "winner_pct": winner_pct,
-        "other_max_pct": other_max_pct, "losing_mayors": losing_mayors,
-    }
 
+def tenant_query_id() -> int:
+    u=current_user()
+    if not u: raise PermissionError()
+    if u["role"]=="superadmin":
+        tid = request.args.get("tenant_id") or request.headers.get("X-Tenant-ID") or session.get("tenant_id")
+        if tid: return int(tid)
+        conn=db(); row=conn.execute("SELECT id FROM tenants ORDER BY id LIMIT 1").fetchone(); conn.close(); return int(row["id"])
+    return int(u["tenant_id"])
+
+
+def get_tenant_settings(conn: sqlite3.Connection, tid: int) -> Dict[str, Any]:
+    rows = conn.execute("SELECT key,value FROM tenant_settings WHERE tenant_id=?", (tid,)).fetchall()
+    raw = {r["key"]: r["value"] for r in rows}
+    return {"total_electors": int(raw.get("total_electors",0) or 0), "total_voters": int(raw.get("total_voters",0) or 0), "council_seats": int(raw.get("council_seats",24) or 24), "winner_mayor": raw.get("winner_mayor",""), "mode": raw.get("mode","first")}
+
+
+def get_election_data(conn: sqlite3.Connection, tid: int) -> Dict[str, Any]:
+    r=conn.execute("SELECT value FROM tenant_settings WHERE tenant_id=? AND key='election_data_json'",(tid,)).fetchone()
+    return safe_json_loads(r["value"] if r else None, DEFAULT_ELECTION_DATA)
+
+
+def save_election_data(conn: sqlite3.Connection, tid: int, data: Dict[str, Any]) -> None:
+    conn.execute("INSERT OR REPLACE INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)", (tid,"election_data_json",json.dumps(data,ensure_ascii=False)))
+
+
+def anagraphics_loaded(conn: sqlite3.Connection, tid: int) -> bool:
+    data = get_election_data(conn,tid); return bool(data.get("mayors")) and bool(data.get("lists")) and any(v.get("candidates") for v in data.get("lists",{}).values())
+
+
+def get_tenant_modules(conn: sqlite3.Connection, tid: int) -> Dict[str,bool]:
+    rows=conn.execute("SELECT module_key,enabled,expires_at FROM tenant_modules WHERE tenant_id=?",(tid,)).fetchall()
+    d={k:False for k in MODULE_CATALOG}
+    today=datetime.now().date()
+    for r in rows:
+        exp_ok=True
+        if r["expires_at"]:
+            try: exp_ok = datetime.fromisoformat(r["expires_at"]).date() >= today
+            except Exception: exp_ok=True
+        if r["module_key"] in d: d[r["module_key"]]=bool(r["enabled"]) and exp_ok
+    return d
+
+
+def get_user_modules(conn: sqlite3.Connection, u: sqlite3.Row) -> Dict[str,bool]:
+    if u["role"] == "superadmin": return {k: True for k in MODULE_CATALOG}
+    tenant_mods = get_tenant_modules(conn, u["tenant_id"])
+    rows=conn.execute("SELECT module_key,enabled FROM admin_module_permissions WHERE user_id=?",(u["id"],)).fetchall()
+    if not rows: return tenant_mods
+    user_mods={r["module_key"]:bool(r["enabled"]) for r in rows}
+    return {k: bool(tenant_mods.get(k)) and bool(user_mods.get(k,False)) for k in MODULE_CATALOG}
+
+
+def module_required(key: str):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            u=current_user()
+            if not u: return jsonify({"ok":False,"error":"Accesso non autorizzato"}),401
+            if u["role"]!="superadmin":
+                conn=db(); allowed=get_user_modules(conn,u).get(key,False); conn.close()
+                if not allowed: return jsonify({"ok":False,"error":f"Modulo {key} non abilitato per questo tenant/admin"}),403
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+
+def api_auth(scopes_required: str = "read"):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            auth=request.headers.get("Authorization","")
+            if not auth.startswith("Bearer "): return jsonify({"ok":False,"error":"API key mancante"}),401
+            raw=auth.split(" ",1)[1].strip(); h=hash_api_key(raw)
+            conn=db(); row=conn.execute("SELECT * FROM api_keys WHERE key_hash=? AND active=1",(h,)).fetchone()
+            if not row: conn.close(); return jsonify({"ok":False,"error":"API key non valida"}),401
+            scopes=set((row["scopes"] or "read").split(","))
+            if scopes_required not in scopes and "admin" not in scopes: conn.close(); return jsonify({"ok":False,"error":"Scope API insufficiente"}),403
+            conn.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",(now(),row["id"])); conn.commit(); conn.close()
+            request.tenant_id=int(row["tenant_id"]); request.api_key_id=int(row["id"])
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+# Pagine statiche
 @app.route("/")
 def login_page():
-    # Prima schermata: accesso guidato. Se già autenticato porta l'utente alla propria area.
-    user = current_user()
-    if user:
-        return redirect("/super" if str(user["role"]).lower() == "superadmin" else ("/admin" if str(user["role"]).lower() == "admin" else "/app"))
-    return send_from_directory(STATIC_DIR, "login.html")
-
+    u=current_user()
+    if u: return redirect("/super" if u["role"]=="superadmin" else ("/admin" if u["role"]=="admin" else "/app"))
+    return send_from_directory(STATIC_DIR,"login.html")
 @app.route("/app")
-def index():
-    if not current_user():
-        return redirect("/")
-    return send_from_directory(STATIC_DIR, "index.html")
-
+def app_page(): return send_from_directory(STATIC_DIR,"index.html") if current_user() else redirect("/")
 @app.route("/super")
 def super_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() != "superadmin":
-        return redirect("/admin" if str(user["role"]).lower() == "admin" else "/app")
-    return send_from_directory(STATIC_DIR, "super.html")
-
+    u=current_user(); return send_from_directory(STATIC_DIR,"super.html") if u and u["role"]=="superadmin" else redirect("/")
 @app.route("/admin")
-def admin_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    return send_from_directory(STATIC_DIR, "admin.html")
+def admin_page(): return send_from_directory(STATIC_DIR,"admin.html") if current_user() else redirect("/")
+for route, fn in [("/admin/charts","admin_charts.html"),("/admin/imports","admin_imports.html"),("/admin/users","admin_users.html"),("/admin/tools","admin_tools.html"),("/admin/modules","admin_modules.html"),("/admin/blockchain","admin_blockchain.html"),("/admin/osint","admin_osint.html"),("/admin/simulator","admin_simulator.html"),("/admin/intelligence","admin_intelligence.html"),("/admin/social","admin_social.html"),("/public-dashboard","public_dashboard.html")]:
+    app.add_url_rule(route, route.replace('/','_'), lambda fn=fn: send_from_directory(STATIC_DIR, fn))
 
-
-@app.route("/admin/charts")
-def admin_charts_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    return send_from_directory(STATIC_DIR, "admin_charts.html")
-
-@app.route("/admin/imports")
-def admin_imports_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    return send_from_directory(STATIC_DIR, "admin_imports.html")
-
-@app.route("/admin/users")
-def admin_users_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    return send_from_directory(STATIC_DIR, "admin_users.html")
-
-
-@app.route("/admin/tools")
-def admin_tools_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    return send_from_directory(STATIC_DIR, "admin_tools.html")
-
-@app.route("/admin/modules")
-def admin_modules_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    return send_from_directory(STATIC_DIR, "admin_modules.html")
-
-@app.route("/admin/blockchain")
-def admin_blockchain_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    if not current_user_module_enabled("blockchain"):
-        return redirect("/admin/modules")
-    return send_from_directory(STATIC_DIR, "admin_blockchain.html")
-
-@app.route("/admin/osint")
-def admin_osint_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    if not current_user_module_enabled("osint"):
-        return redirect("/admin/modules")
-    return send_from_directory(STATIC_DIR, "admin_osint.html")
-
-@app.route("/admin/simulator")
-def admin_simulator_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    if not current_user_module_enabled("simulator"):
-        return redirect("/admin/modules")
-    return send_from_directory(STATIC_DIR, "admin_simulator.html")
-
-@app.route("/admin/intelligence")
-def admin_intelligence_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    if not current_user_module_enabled("intelligence"):
-        return redirect("/admin/modules")
-    return send_from_directory(STATIC_DIR, "admin_intelligence.html")
-
-@app.route("/admin/social")
-def admin_social_page():
-    user = current_user()
-    if not user:
-        return redirect("/")
-    if str(user["role"]).lower() not in ["admin", "superadmin"]:
-        return redirect("/app")
-    if not current_user_module_enabled("social"):
-        return redirect("/admin/modules")
-    return send_from_directory(STATIC_DIR, "admin_social.html")
-
-@app.route("/public-dashboard")
-def public_dashboard_page():
-    return send_from_directory(STATIC_DIR, "public_dashboard.html")
-
+# Auth
 @app.post("/api/login")
 def login():
-    data = request.get_json(force=True)
-    phone = str(data.get("phone", "")).strip()
-    pin = str(data.get("pin", "")).strip()
-    token = str(data.get("token", "")).strip()
-    conn = db()
-    user = None
-    if token:
-        user = conn.execute("SELECT * FROM users WHERE qr_token=? AND active=1", (token,)).fetchone()
+    data=request.get_json(force=True); phone=str(data.get("phone","")).strip(); pin=str(data.get("pin","")).strip(); token=str(data.get("token","")).strip()
+    conn=db(); u=None
+    if token: u=conn.execute("SELECT * FROM users WHERE qr_token=? AND active=1",(token,)).fetchone()
     elif phone and pin:
-        user = conn.execute("SELECT * FROM users WHERE phone=? AND active=1", (phone,)).fetchone()
-        if user and not check_password_hash(user["pin_hash"], pin):
-            user = None
+        u=conn.execute("SELECT * FROM users WHERE phone=? AND active=1",(phone,)).fetchone()
+        if u and not check_password_hash(u["pin_hash"],pin): u=None
+    if u and u["role"]!="superadmin" and tenant_expired(u["tenant_id"]): conn.close(); return jsonify({"ok":False,"error":"Organizzazione scaduta o disattivata"}),402
     conn.close()
-    if not user:
-        return jsonify({"ok": False, "error": "Credenziali non valide"}), 401
-    session["uid"] = user["id"]
-    return jsonify({"ok": True, "user": public_user(user)})
-
+    if not u: return jsonify({"ok":False,"error":"Credenziali non valide"}),401
+    session["uid"]=u["id"]; session["tenant_id"]=u["tenant_id"]
+    return jsonify({"ok":True,"user":public_user(u)})
 @app.post("/api/logout")
-def logout():
-    # Logout usato dalle chiamate JavaScript: pulisce interamente la sessione Flask.
-    session.clear()
-    return jsonify({"ok": True})
-
+def logout(): session.clear(); return jsonify({"ok":True})
 @app.get("/logout")
-def logout_page():
-    # Logout di sicurezza usabile anche come semplice link HTML.
-    session.clear()
-    return redirect("/")
-
+def logout_get(): session.clear(); return redirect("/")
 @app.get("/api/me")
 @login_required
-def me():
-    return jsonify({"ok": True, "user": public_user(current_user())})
+def me(): return jsonify({"ok":True,"user":public_user(current_user())})
 
+# Tenant-aware operational APIs
 @app.get("/api/config")
 @login_required
 def config():
-    conn = db()
-    settings = get_settings(conn)
-    conn.close()
-    return jsonify({"ok": True, "data": election_data_for_user(current_user()), "all_data": ELECTION_DATA if str(current_user()["role"]).lower() == "admin" else None, "settings": settings, "anagraphics": anagraphics_status_payload()})
+    tid=tenant_query_id(); conn=db(); data=get_election_data(conn,tid); settings=get_tenant_settings(conn,tid); conn.close()
+    loaded=bool(data.get("mayors")) and bool(data.get("lists"))
+    return jsonify({"ok":True,"tenant_id":tid,"data":data,"all_data":data,"settings":settings,"anagraphics":{"loaded":loaded,"message":"Caricare anagrafiche per questo tenant"}})
 
+@app.get("/api/election-data")
+@admin_required
+def get_election_data_api():
+    tid=tenant_query_id(); conn=db(); data=get_election_data(conn,tid); conn.close(); return jsonify({"ok":True,"tenant_id":tid,"data":data})
+@app.post("/api/election-data")
+@admin_required
+def save_election_data_api():
+    tid=tenant_query_id(); data=request.get_json(force=True).get("data")
+    if not isinstance(data,dict) or not isinstance(data.get("mayors"),list) or not isinstance(data.get("lists"),dict): return jsonify({"ok":False,"error":"Formato non valido"}),400
+    conn=db(); save_election_data(conn,tid,data); audit(conn,tid,current_user()["id"],"save_election_data","tenant_settings",data); conn.commit(); conn.close(); return jsonify({"ok":True,"message":"Anagrafiche tenant aggiornate"})
 
-@app.get("/api/anagraphics-status")
-@login_required
-def anagraphics_status():
-    # Endpoint leggero usato dalla UX per mostrare cosa deve essere caricato
-    # prima di usare dashboard, inserimento voti e moduli premium.
-    return jsonify({"ok": True, "anagraphics": anagraphics_status_payload()})
-
+@app.post("/api/settings")
+@admin_required
+def settings_api():
+    tid=tenant_query_id(); data=request.get_json(force=True); allowed={"total_electors","total_voters","council_seats","winner_mayor","mode"}
+    conn=db()
+    for k in allowed:
+        if k in data: conn.execute("INSERT OR REPLACE INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)",(tid,k,str(data[k])))
+    audit(conn,tid,current_user()["id"],"update_settings","tenant_settings",data); conn.commit(); s=get_tenant_settings(conn,tid); conn.close(); return jsonify({"ok":True,"settings":s})
 
 @app.get("/api/my-report")
 @login_required
 def my_report():
-    user = current_user()
-    section = request.args.get("section", user["section"] or "").strip()
+    u=current_user(); tid=tenant_query_id(); section=(request.args.get("section") or u["section"] or "").strip()
+    if not section: return jsonify({"ok":True,"exists":False})
+    if u["role"] not in ("admin","superadmin") and u["section"] and section!=u["section"]: return jsonify({"ok":False,"error":"Sezione non autorizzata"}),403
+    conn=db(); rep=conn.execute("SELECT * FROM reports WHERE tenant_id=? AND section=?",(tid,section)).fetchone()
+    if not rep: conn.close(); return jsonify({"ok":True,"exists":False,"section":section})
+    rows=conn.execute("SELECT * FROM votes WHERE tenant_id=? AND report_id=?",(tid,rep["id"])).fetchall(); conn.close()
+    mayors={}; list_votes={}; prefs={}
+    for r in rows:
+        if r["vote_type"]=="sindaco": mayors[r["name"]]=r["votes"]
+        elif r["vote_type"]=="lista": list_votes[r["list_name"]]=r["votes"]
+        elif r["vote_type"]=="preferenza": prefs.setdefault(r["list_name"],{})[r["name"]]=r["votes"]
+    return jsonify({"ok":True,"exists":True,"section":section,"voters":rep["voters"],"blank_ballots":rep["blank_ballots"],"null_ballots":rep["null_ballots"],"contested_ballots":rep["contested_ballots"],"section_electors":rep["contested_ballots"],"split_votes":safe_json_loads(rep["split_votes_json"],[]),"closed":bool(rep["closed"]),"closed_at":rep["closed_at"],"mayors":mayors,"list_votes":list_votes,"preferences":prefs,"updated_at":rep["updated_at"]})
 
-    if not section:
-        return jsonify({"ok": True, "exists": False})
 
-    if user["role"] != "admin" and user["section"] and section != user["section"]:
-        return jsonify({"ok": False, "error": "Rappresentante non autorizzato per questa sezione"}), 403
-
-    conn = db()
-    report = conn.execute(
-        "SELECT * FROM reports WHERE section=? ORDER BY updated_at DESC LIMIT 1",
-        (section,)
-    ).fetchone()
-
-    if not report:
-        conn.close()
-        return jsonify({"ok": True, "exists": False, "section": section})
-
-    votes = conn.execute(
-        "SELECT vote_type, list_name, name, votes FROM votes WHERE report_id=?",
-        (report["id"],)
-    ).fetchall()
-    conn.close()
-
-    mayors = {}
-    list_votes = {}
-    preferences = {}
-
-    for row in votes:
-        if row["vote_type"] == "sindaco":
-            mayors[row["name"]] = row["votes"]
-        elif row["vote_type"] == "lista":
-            list_votes[row["list_name"]] = row["votes"]
-        elif row["vote_type"] == "preferenza":
-            preferences.setdefault(row["list_name"], {})
-            preferences[row["list_name"]][row["name"]] = row["votes"]
-
-    return jsonify({
-        "ok": True,
-        "exists": True,
-        "section": report["section"],
-        "voters": report["voters"],
-        "blank_ballots": report["blank_ballots"],
-        "null_ballots": report["null_ballots"],
-        "section_electors": report["contested_ballots"],
-        "contested_ballots": report["contested_ballots"],
-        "split_votes": _safe_split_votes(report["split_votes_json"] if "split_votes_json" in report.keys() else "[]"),
-        "closed": bool(report["closed"]),
-        "closed_at": report["closed_at"],
-        "mayors": mayors,
-        "list_votes": list_votes,
-        "preferences": preferences,
-        "updated_at": report["updated_at"]
-    })
+def _save_report_payload(tid:int, user_id:int, data:Dict[str,Any], close:bool=False) -> Tuple[bool,Dict[str,Any],int]:
+    section=str(data.get("section","")).strip(); voters=int(data.get("voters",0) or 0); blank=int(data.get("blank_ballots",0) or 0); null=int(data.get("null_ballots",0) or 0); contested=int(data.get("section_electors", data.get("contested_ballots",0)) or 0)
+    if not section: return False,{"ok":False,"error":"Inserire sezione"},400
+    conn=db(); ed=get_election_data(conn,tid)
+    if not anagraphics_loaded(conn,tid): conn.close(); return False,{"ok":False,"error":"Caricare prima anagrafiche del tenant"},400
+    mayor_votes=data.get("mayors",{}); list_votes=data.get("list_votes",{}); prefs=data.get("preferences",{}); split=safe_json_loads(data.get("split_votes",[]),[])
+    valid=max(sum(int(v or 0) for v in mayor_votes.values()), sum(int(v or 0) for v in list_votes.values()))
+    if close and voters != valid+blank+null:
+        conn.close(); return False,{"ok":False,"error":f"Quadratura non valida: votanti={voters}, valido+bianche+nulle={valid+blank+null}"},400
+    existing=conn.execute("SELECT id,closed FROM reports WHERE tenant_id=? AND section=?",(tid,section)).fetchone(); n=now()
+    if existing:
+        rid=existing["id"]; conn.execute("UPDATE reports SET user_id=?,voters=?,blank_ballots=?,null_ballots=?,contested_ballots=?,split_votes_json=?,closed=?,closed_at=?,updated_at=? WHERE tenant_id=? AND id=?",(user_id,voters,blank,null,contested,json.dumps(split,ensure_ascii=False),1 if close else existing["closed"],n if close else existing["closed_at"],n,tid,rid)); conn.execute("DELETE FROM votes WHERE tenant_id=? AND report_id=?",(tid,rid))
+    else:
+        conn.execute("INSERT INTO reports(tenant_id,user_id,section,voters,blank_ballots,null_ballots,contested_ballots,split_votes_json,closed,closed_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(tid,user_id,section,voters,blank,null,contested,json.dumps(split,ensure_ascii=False),1 if close else 0,n if close else None,n,n)); rid=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    for name in ed.get("mayors",[]): conn.execute("INSERT INTO votes(tenant_id,report_id,vote_type,list_name,name,votes) VALUES(?,?,?,?,?,?)",(tid,rid,"sindaco",None,name,int(mayor_votes.get(name,0) or 0)))
+    for lname,lobj in ed.get("lists",{}).items():
+        conn.execute("INSERT INTO votes(tenant_id,report_id,vote_type,list_name,name,votes) VALUES(?,?,?,?,?,?)",(tid,rid,"lista",lname,lname,int(list_votes.get(lname,0) or 0)))
+        for cand in lobj.get("candidates",[]): conn.execute("INSERT INTO votes(tenant_id,report_id,vote_type,list_name,name,votes) VALUES(?,?,?,?,?,?)",(tid,rid,"preferenza",lname,cand,int(prefs.get(lname,{}).get(cand,0) or 0)))
+    audit(conn,tid,user_id,"close_report" if close else "save_report","reports",{"section":section}); conn.commit(); conn.close(); return True,{"ok":True,"message":"Seggio chiuso" if close else "Dati salvati"},200
 
 @app.post("/api/report")
 @login_required
 def save_report():
-    user = current_user()
-    data = request.get_json(force=True)
-    section = str(data.get("section", "")).strip()
-    voters = int(data.get("voters", 0) or 0)
-    blank_ballots = int(data.get("blank_ballots", 0) or 0)
-    null_ballots = int(data.get("null_ballots", 0) or 0)
-    section_electors = int(data.get("section_electors", data.get("contested_ballots", 0)) or 0)
-    mayor_votes = data.get("mayors", {})
-    list_votes = data.get("list_votes", {})
-    preferences = data.get("preferences", {})
-    split_votes = _safe_split_votes(data.get("split_votes", []))
-    if not anagraphics_loaded():
-        return jsonify({"ok": False, "error": anagraphics_status_payload()["message"], "anagraphics": anagraphics_status_payload()}), 400
-    if not section:
-        return jsonify({"ok": False, "error": "Inserire la sezione"}), 400
-    if user["role"] != "admin" and user["section"] and section != user["section"]:
-        return jsonify({"ok": False, "error": "Rappresentante non autorizzato per questa sezione"}), 403
-    valid_mayor_votes = sum(int(v or 0) for v in mayor_votes.values())
-    valid_list_votes = sum(int(v or 0) for v in list_votes.values())
-    valid_votes = max(valid_mayor_votes, valid_list_votes)
-    expected_voters = valid_votes + blank_ballots + null_ballots
-    # Invio parziale consentito anche se la quadratura non è definitiva.
-    # Il controllo bloccante avviene solo con il pulsante Chiudi seggio.
-    now = datetime.now().isoformat(timespec="seconds")
-    conn = db()
-    cur = conn.cursor()
-    existing = cur.execute("SELECT id, closed FROM reports WHERE section=?", (section,)).fetchone()
-    if existing and user["role"] != "admin" and existing["closed"]:
-        conn.close()
-        return jsonify({"ok": False, "error": "Il seggio risulta gia' chiuso. Non puoi piu' modificare o inviare dati."}), 403
-    if existing:
-        report_id = existing["id"]
-        cur.execute("UPDATE reports SET voters=?, blank_ballots=?, null_ballots=?, contested_ballots=?, split_votes_json=?, updated_at=? WHERE id=?", (voters, blank_ballots, null_ballots, section_electors, json.dumps(split_votes, ensure_ascii=False), now, report_id))
-        cur.execute("DELETE FROM votes WHERE report_id=?", (report_id,))
-    else:
-        cur.execute("INSERT INTO reports(user_id, section, voters, blank_ballots, null_ballots, contested_ballots, split_votes_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (user["id"], section, voters, blank_ballots, null_ballots, section_electors, json.dumps(split_votes, ensure_ascii=False), now, now))
-        report_id = cur.lastrowid
-    for name in ELECTION_DATA["mayors"]:
-        cur.execute("INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)", (report_id, "sindaco", None, name, int(mayor_votes.get(name, 0) or 0)))
-    for list_name, list_obj in ELECTION_DATA["lists"].items():
-        cur.execute("INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)", (report_id, "lista", list_name, list_name, int(list_votes.get(list_name, 0) or 0)))
-        pref_for_list = preferences.get(list_name, {})
-        for candidate in list_obj["candidates"]:
-            cur.execute("INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)", (report_id, "preferenza", list_name, candidate, int(pref_for_list.get(candidate, 0) or 0)))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "message": "Dati inviati al server centrale"})
-
-
-@app.get("/api/section-status")
-@login_required
-def section_status():
-    user = current_user()
-    section = request.args.get("section", user["section"] or "").strip()
-    if not section:
-        return jsonify({"ok": True, "closed": False, "section": section})
-    conn = db()
-    row = conn.execute("SELECT closed, closed_at FROM reports WHERE section=? ORDER BY updated_at DESC LIMIT 1", (section,)).fetchone()
-    conn.close()
-    return jsonify({"ok": True, "section": section, "closed": bool(row["closed"]) if row else False, "closed_at": row["closed_at"] if row else None})
-
+    u=current_user(); tid=tenant_query_id(); data=request.get_json(force=True)
+    if u["role"] not in ("admin","superadmin") and u["section"] and str(data.get("section","")).strip()!=u["section"]: return jsonify({"ok":False,"error":"Sezione non autorizzata"}),403
+    ok,p,code=_save_report_payload(tid,u["id"],data,False); return jsonify(p),code
 @app.post("/api/close-seat")
 @login_required
 def close_seat():
-    user = current_user()
-    if user["role"] == "admin":
-        return jsonify({"ok": False, "error": "La chiusura seggio è riservata al rappresentante."}), 403
-    data = request.get_json(force=True)
-    section = str(data.get("section", "")).strip()
-    voters = int(data.get("voters", 0) or 0)
-    blank_ballots = int(data.get("blank_ballots", 0) or 0)
-    null_ballots = int(data.get("null_ballots", 0) or 0)
-    section_electors = int(data.get("section_electors", data.get("contested_ballots", 0)) or 0)
-    mayor_votes = data.get("mayors", {})
-    list_votes = data.get("list_votes", {})
-    preferences = data.get("preferences", {})
-    split_votes = _safe_split_votes(data.get("split_votes", []))
-    if not anagraphics_loaded():
-        return jsonify({"ok": False, "error": anagraphics_status_payload()["message"], "anagraphics": anagraphics_status_payload()}), 400
-    if not section:
-        return jsonify({"ok": False, "error": "Inserire la sezione"}), 400
-    if user["section"] and section != user["section"]:
-        return jsonify({"ok": False, "error": "Rappresentante non autorizzato per questa sezione"}), 403
-    valid_mayor_votes = sum(int(v or 0) for v in mayor_votes.values())
-    valid_list_votes = sum(int(v or 0) for v in list_votes.values())
-    valid_votes = max(valid_mayor_votes, valid_list_votes)
-    expected_voters = valid_votes + blank_ballots + null_ballots
-    if voters != expected_voters:
-        return jsonify({"ok": False, "error": f"Non è possibile chiudere il seggio: votanti={voters}, totale valido + bianche + nulle={expected_voters}. Le contestate sono solo indicative."}), 400
-    now = datetime.now().isoformat(timespec="seconds")
-    conn = db(); cur = conn.cursor()
-    existing = cur.execute("SELECT id, closed FROM reports WHERE section=?", (section,)).fetchone()
-    if existing and existing["closed"]:
-        conn.close(); return jsonify({"ok": False, "error": "Il seggio è gia' chiuso."}), 403
-    if existing:
-        report_id = existing["id"]
-        cur.execute("UPDATE reports SET voters=?, blank_ballots=?, null_ballots=?, contested_ballots=?, split_votes_json=?, closed=1, closed_at=?, updated_at=? WHERE id=?", (voters, blank_ballots, null_ballots, section_electors, json.dumps(split_votes, ensure_ascii=False), now, now, report_id))
-        cur.execute("DELETE FROM votes WHERE report_id=?", (report_id,))
-    else:
-        cur.execute("INSERT INTO reports(user_id, section, voters, blank_ballots, null_ballots, contested_ballots, split_votes_json, closed, closed_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (user["id"], section, voters, blank_ballots, null_ballots, section_electors, json.dumps(split_votes, ensure_ascii=False), 1, now, now, now))
-        report_id = cur.lastrowid
-    for name in ELECTION_DATA["mayors"]:
-        cur.execute("INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)", (report_id, "sindaco", None, name, int(mayor_votes.get(name, 0) or 0)))
-    for list_name, list_obj in ELECTION_DATA["lists"].items():
-        cur.execute("INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)", (report_id, "lista", list_name, list_name, int(list_votes.get(list_name, 0) or 0)))
-        pref_for_list = preferences.get(list_name, {})
-        for candidate in list_obj["candidates"]:
-            cur.execute("INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)", (report_id, "preferenza", list_name, candidate, int(pref_for_list.get(candidate, 0) or 0)))
-    conn.commit(); conn.close(); session.clear()
-    return jsonify({"ok": True, "message": "Grazie per il tuo contributo. Il seggio è stato chiuso correttamente."})
+    u=current_user(); tid=tenant_query_id(); data=request.get_json(force=True)
+    if u["role"]=="admin": return jsonify({"ok":False,"error":"La chiusura seggio è riservata al rappresentante"}),403
+    ok,p,code=_save_report_payload(tid,u["id"],data,True); return jsonify(p),code
+@app.get("/api/section-status")
+@login_required
+def section_status():
+    tid=tenant_query_id(); section=request.args.get("section","").strip(); conn=db(); r=conn.execute("SELECT closed,closed_at FROM reports WHERE tenant_id=? AND section=?",(tid,section)).fetchone(); conn.close(); return jsonify({"ok":True,"section":section,"closed":bool(r["closed"]) if r else False,"closed_at":r["closed_at"] if r else None})
 
-@app.post("/api/reopen-section")
+@app.get("/api/users")
 @admin_required
-def reopen_section():
-    data = request.get_json(force=True)
-    section = str(data.get("section", "")).strip()
-
-    if not section:
-        return jsonify({"ok": False, "error": "Sezione obbligatoria"}), 400
-
-    now = datetime.now().isoformat(timespec="seconds")
-
-    conn = db()
-    cur = conn.cursor()
-
-    row = cur.execute(
-        "SELECT id FROM reports WHERE section=? ORDER BY updated_at DESC LIMIT 1",
-        (section,)
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        return jsonify({"ok": False, "error": "Nessuna rilevazione trovata per questo seggio"}), 404
-
-    # Riattiva il seggio mantenendo tutti i dati gia' aggiornati presenti nel database.
-    cur.execute(
-        "UPDATE reports SET closed=0, closed_at=NULL, updated_at=? WHERE section=?",
-        (now, section)
-    )
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({
-        "ok": True,
-        "message": "Seggio riattivato con i dati aggiornati gia' presenti. Il rappresentante può nuovamente accedere e modificare."
-    })
-
-
-
-@app.get("/api/dashboard")
+def users_api():
+    u=current_user(); tid=tenant_query_id(); conn=db();
+    if u["role"]=="superadmin": rows=conn.execute("SELECT id,tenant_id,name,phone,role,section,allowed_lists,qr_token,active FROM users ORDER BY tenant_id,id").fetchall()
+    else: rows=conn.execute("SELECT id,tenant_id,name,phone,role,section,allowed_lists,qr_token,active FROM users WHERE tenant_id=? ORDER BY id",(tid,)).fetchall()
+    ed=get_election_data(conn,tid); conn.close(); return jsonify({"ok":True,"users":[dict(r) for r in rows],"lists":sorted(ed.get("lists",{}).keys())})
+@app.post("/api/users")
 @admin_required
-def dashboard():
-    conn = db()
-    mayors = conn.execute("SELECT name, SUM(votes) AS total FROM votes WHERE vote_type='sindaco' GROUP BY name ORDER BY total DESC").fetchall()
-    lists = conn.execute("SELECT list_name AS name, SUM(votes) AS total FROM votes WHERE vote_type='lista' GROUP BY list_name ORDER BY total DESC").fetchall()
-    preferences = conn.execute("SELECT list_name, name, SUM(votes) AS total FROM votes WHERE vote_type='preferenza' GROUP BY list_name, name ORDER BY total DESC").fetchall()
-    sections = conn.execute("""
-        SELECT r.section, u.name AS representative, r.updated_at,
-          r.voters, r.blank_ballots, r.null_ballots, r.contested_ballots, r.split_votes_json, r.closed, r.closed_at,
-          SUM(CASE WHEN v.vote_type='sindaco' THEN v.votes ELSE 0 END) AS total_mayors,
-          SUM(CASE WHEN v.vote_type='lista' THEN v.votes ELSE 0 END) AS total_lists,
-          SUM(CASE WHEN v.vote_type='preferenza' THEN v.votes ELSE 0 END) AS total_preferences
-        FROM reports r
-        JOIN users u ON u.id=r.user_id
-        JOIN votes v ON v.report_id=r.id
-        GROUP BY r.id
-        ORDER BY CAST(r.section AS INTEGER), r.section
-    """).fetchall()
-    ballot_totals = conn.execute("SELECT COALESCE(SUM(voters),0) AS voters, COALESCE(SUM(blank_ballots),0) AS blank_ballots, COALESCE(SUM(null_ballots),0) AS null_ballots, COALESCE(SUM(contested_ballots),0) AS section_electors FROM reports").fetchone()
-    election = compute_elected(conn)
-    conn.close()
-    
-    section_dicts = []
-    split_total = 0
-    for row in sections:
-        item = dict(row)
-        sv = _safe_split_votes(item.get("split_votes_json", "[]"))
-        item["split_vote_count"] = sum(int(x.get("votes", 0) or 0) for x in sv if isinstance(x, dict))
-        item.pop("split_votes_json", None)
-        split_total += item["split_vote_count"]
-        section_dicts.append(item)
-    bt = dict(ballot_totals)
-    bt["split_vote_count"] = split_total
-    return jsonify({"ok": True, "mayors": [dict(row) for row in mayors], "lists": [dict(row) for row in lists], "preferences": [dict(row) for row in preferences], "sections": section_dicts, "ballot_totals": bt, "data": ELECTION_DATA, "election": election})
-
-
-
-def _intelligence_payload(conn):
-    settings = get_settings(conn)
-    # Totali generali
-    mayor_rows = conn.execute("SELECT name, SUM(votes) AS total FROM votes WHERE vote_type='sindaco' GROUP BY name ORDER BY total DESC").fetchall()
-    list_rows = conn.execute("SELECT list_name AS name, SUM(votes) AS total FROM votes WHERE vote_type='lista' GROUP BY list_name ORDER BY total DESC").fetchall()
-    pref_rows = conn.execute("SELECT list_name, name, SUM(votes) AS total FROM votes WHERE vote_type='preferenza' GROUP BY list_name, name ORDER BY total DESC").fetchall()
-    section_rows = conn.execute("""
-        SELECT r.id, r.section, r.voters, r.blank_ballots, r.null_ballots, r.contested_ballots, r.split_votes_json, r.closed, r.updated_at,
-               u.name AS representative
-        FROM reports r LEFT JOIN users u ON u.id=r.user_id
-        ORDER BY CAST(r.section AS INTEGER), r.section
-    """).fetchall()
-    vote_rows = conn.execute("""
-        SELECT r.section, v.vote_type, v.list_name, v.name, v.votes
-        FROM votes v JOIN reports r ON r.id=v.report_id
-    """).fetchall()
-
-    sections = {str(r["section"]): dict(r) for r in section_rows}
-    for sec, item in sections.items():
-        item["mayors"] = {}
-        item["lists"] = {}
-        item["preferences"] = {}
-        split = _safe_split_votes(item.get("split_votes_json", "[]"))
-        item["split_vote_count"] = sum(int(x.get("votes", 0) or 0) for x in split if isinstance(x, dict))
-        item["split_votes"] = split
-        item.pop("split_votes_json", None)
-
-    for v in vote_rows:
-        sec = str(v["section"])
-        if sec not in sections:
-            continue
-        if v["vote_type"] == "sindaco":
-            sections[sec]["mayors"][v["name"]] = int(v["votes"] or 0)
-        elif v["vote_type"] == "lista":
-            sections[sec]["lists"][v["list_name"]] = int(v["votes"] or 0)
-        elif v["vote_type"] == "preferenza":
-            sections[sec]["preferences"].setdefault(v["list_name"], {})[v["name"]] = int(v["votes"] or 0)
-
-    total_list_votes = sum(int(r["total"] or 0) for r in list_rows)
-    total_mayor_votes = sum(int(r["total"] or 0) for r in mayor_rows)
-    total_voters = settings.get("total_voters") or sum(int(r["voters"] or 0) for r in section_rows)
-    total_electors = settings.get("total_electors") or sum(int(r["contested_ballots"] or 0) for r in section_rows)
-    split_total = sum(x.get("split_vote_count",0) for x in sections.values())
-
-    # 1) Heatmap territoriale: intensità consenso per sezione/lista/coalizione/sindaco.
-    heatmap = []
-    for sec, item in sections.items():
-        voters = int(item.get("voters") or 0)
-        electors = int(item.get("contested_ballots") or 0)
-        list_total = sum(item["lists"].values())
-        mayor_total = sum(item["mayors"].values())
-        turnout = (voters / electors * 100) if electors else 0
-        top_list, top_list_votes = (None, 0)
-        if item["lists"]:
-            top_list, top_list_votes = max(item["lists"].items(), key=lambda kv: kv[1])
-        top_mayor, top_mayor_votes = (None, 0)
-        if item["mayors"]:
-            top_mayor, top_mayor_votes = max(item["mayors"].items(), key=lambda kv: kv[1])
-        coalition_votes = {}
-        for lname, votes in item["lists"].items():
-            coalition = ELECTION_DATA["lists"].get(lname, {}).get("coalition", "Non classificata")
-            coalition_votes[coalition] = coalition_votes.get(coalition, 0) + votes
-        top_coalition, top_coalition_votes = (None, 0)
-        if coalition_votes:
-            top_coalition, top_coalition_votes = max(coalition_votes.items(), key=lambda kv: kv[1])
-        heatmap.append({
-            "section": sec,
-            "representative": item.get("representative") or "",
-            "voters": voters,
-            "electors": electors,
-            "turnout_pct": round(turnout,2),
-            "valid_lists": list_total,
-            "valid_mayors": mayor_total,
-            "top_list": top_list,
-            "top_list_votes": top_list_votes,
-            "top_list_pct": round((top_list_votes/list_total*100),2) if list_total else 0,
-            "top_mayor": top_mayor,
-            "top_mayor_votes": top_mayor_votes,
-            "top_mayor_pct": round((top_mayor_votes/mayor_total*100),2) if mayor_total else 0,
-            "top_coalition": top_coalition,
-            "top_coalition_votes": top_coalition_votes,
-            "top_coalition_pct": round((top_coalition_votes/list_total*100),2) if list_total else 0,
-            "split_vote_count": item.get("split_vote_count",0),
-            "split_rate_pct": round((item.get("split_vote_count",0)/voters*100),2) if voters else 0,
-            "closed": bool(item.get("closed")),
-            "updated_at": item.get("updated_at")
-        })
-
-    # 2) Reti clientelari/body politico: grafo candidato -> sezione -> lista con alert concentrazione.
-    body_nodes = {}
-    body_edges = []
-    concentration_alerts = []
-    for sec, item in sections.items():
-        for list_name, prefs in item["preferences"].items():
-            for cand, votes in prefs.items():
-                votes = int(votes or 0)
-                if votes <= 0: continue
-                key_c = "cand::"+cand
-                key_s = "sec::"+sec
-                key_l = "list::"+list_name
-                body_nodes[key_c] = {"id": key_c, "label": cand, "type": "candidate", "weight": body_nodes.get(key_c,{}).get("weight",0)+votes}
-                body_nodes[key_s] = {"id": key_s, "label": "Sez. "+sec, "type": "section", "weight": body_nodes.get(key_s,{}).get("weight",0)+votes}
-                body_nodes[key_l] = {"id": key_l, "label": list_name, "type": "list", "weight": body_nodes.get(key_l,{}).get("weight",0)+votes}
-                body_edges.append({"source": key_c, "target": key_s, "votes": votes})
-                body_edges.append({"source": key_c, "target": key_l, "votes": votes})
-                sec_total_pref = sum(int(v or 0) for all_prefs in item["preferences"].values() for v in all_prefs.values())
-                rate = (votes/sec_total_pref*100) if sec_total_pref else 0
-                if votes >= 10 and rate >= 25:
-                    concentration_alerts.append({"candidate": cand, "list": list_name, "section": sec, "votes": votes, "section_pref_share_pct": round(rate,2), "level": "alta" if rate >= 40 else "media"})
-    top_edges = sorted(body_edges, key=lambda e:e["votes"], reverse=True)[:120]
-    top_node_ids = set()
-    for e in top_edges:
-        top_node_ids.add(e["source"]); top_node_ids.add(e["target"])
-    body_graph = {"nodes": [n for k,n in body_nodes.items() if k in top_node_ids], "edges": top_edges, "alerts": sorted(concentration_alerts, key=lambda x:(-x["section_pref_share_pct"], -x["votes"]))[:80]}
-
-    # 3) Predizione elettorale AI-like: proiezione deterministica su sezioni mancanti, scenario prudente.
-    closed_sections = [h for h in heatmap if h["closed"]]
-    loaded_sections = [h for h in heatmap if h["valid_lists"] or h["valid_mayors"]]
-    avg_voters = (sum(h["voters"] for h in loaded_sections)/len(loaded_sections)) if loaded_sections else 0
-    target_voters = total_voters or sum(h["voters"] for h in loaded_sections)
-    observed_voters = sum(h["voters"] for h in loaded_sections)
-    missing_voters = max(0, target_voters - observed_voters)
-    list_totals = {r["name"]: int(r["total"] or 0) for r in list_rows}
-    mayor_totals = {r["name"]: int(r["total"] or 0) for r in mayor_rows}
-    def project(totals, observed_total):
-        out=[]
-        for name, val in totals.items():
-            share = val/observed_total if observed_total else 0
-            projected = val + round(missing_voters * share)
-            out.append({"name": name, "current": val, "share_pct": round(share*100,2), "projected": projected})
-        return sorted(out, key=lambda x:x["projected"], reverse=True)
-    prediction = {
-        "method": "Proiezione proporzionale sulle sezioni caricate con correzione dei votanti mancanti; usare come scenario operativo, non come sondaggio.",
-        "loaded_sections": len(loaded_sections),
-        "closed_sections": len(closed_sections),
-        "observed_voters": observed_voters,
-        "target_voters": target_voters,
-        "missing_voters_estimate": missing_voters,
-        "average_voters_loaded_section": round(avg_voters,2),
-        "mayors": project(mayor_totals, total_mayor_votes),
-        "lists": project(list_totals, total_list_votes)
-    }
-
-    # 4) Peso politico reale: traino, efficienza, radicamento, dispersione preferenze.
-    pref_totals = {}
-    candidate_sections = {}
-    for sec, item in sections.items():
-        for list_name, prefs in item["preferences"].items():
-            for cand, votes in prefs.items():
-                votes=int(votes or 0)
-                if votes<=0: continue
-                key=(list_name,cand)
-                pref_totals[key]=pref_totals.get(key,0)+votes
-                candidate_sections.setdefault(key,{})[sec]=votes
-    political_weight=[]
-    for (list_name,cand), votes in pref_totals.items():
-        list_total = list_totals.get(list_name,0)
-        sections_map = candidate_sections.get((list_name,cand),{})
-        max_section = max(sections_map.values()) if sections_map else 0
-        spread = len([v for v in sections_map.values() if v>0])
-        concentration = (max_section/votes*100) if votes else 0
-        eff = (votes/list_total*100) if list_total else 0
-        body_index = min(100, round(eff*4 + spread*3 + (100-concentration)*0.25,2))
-        political_weight.append({
-            "candidate": cand, "list": list_name, "coalition": ELECTION_DATA["lists"].get(list_name,{}).get("coalition",""),
-            "preferences": votes, "list_total": list_total, "preference_on_list_pct": round(eff,2),
-            "sections_with_votes": spread, "max_section_votes": max_section, "concentration_pct": round(concentration,2),
-            "body_index": body_index,
-            "profile": "leader territoriale" if votes>=30 and concentration>=45 else ("diffuso" if spread>=5 and concentration<40 else "presidio locale")
-        })
-    political_weight.sort(key=lambda x:(-x["body_index"], -x["preferences"]))
-
-    # Social score: ranking comunicabile pubblicamente.
-    social_cards=[]
-    for i,x in enumerate(political_weight[:60], start=1):
-        score = min(100, round(x["body_index"]*0.65 + x["preference_on_list_pct"]*1.8 + x["sections_with_votes"]*1.2,2))
-        badges=[]
-        if x["profile"]=="leader territoriale": badges.append("Leader territoriale")
-        if x["sections_with_votes"]>=5: badges.append("Consenso diffuso")
-        if x["concentration_pct"]>=45: badges.append("Sezione forte")
-        if not badges: badges.append("Candidato emergente")
-        social_cards.append({**x, "rank": i, "political_score": score, "badges": badges, "share_text": f"{x['candidate']} · {x['list']} · Political Score {score}/100 · {', '.join(badges)}"})
-
-    return {
-        "ok": True,
-        "summary": {"total_electors": total_electors, "total_voters": total_voters, "observed_voters": observed_voters, "total_list_votes": total_list_votes, "total_mayor_votes": total_mayor_votes, "split_vote_count": split_total, "sections_loaded": len(loaded_sections), "sections_closed": len(closed_sections)},
-        "heatmap": heatmap,
-        "body_graph": body_graph,
-        "prediction": prediction,
-        "political_weight": political_weight,
-        "social_cards": social_cards,
-        "data": ELECTION_DATA
-    }
-
-@app.get("/api/intelligence")
-@admin_required
-def intelligence_api():
-    conn = db()
-    payload = _intelligence_payload(conn)
-    conn.close()
-    return jsonify(payload)
-
-@app.get("/api/public-dashboard")
-def public_dashboard_api():
-    conn = db()
-    payload = _intelligence_payload(conn)
-    conn.close()
-    # Endpoint pensato per dashboard condivisibili: niente utenti, telefoni o note operative interne.
-    return jsonify({
-        "ok": True,
-        "summary": payload["summary"],
-        "heatmap": payload["heatmap"],
-        "prediction": payload["prediction"],
-        "social_cards": payload["social_cards"][:30]
-    })
-
-@app.post("/api/settings")
-@admin_required
-def update_settings():
-    data = request.get_json(force=True)
-    allowed = ["total_electors", "total_voters", "council_seats", "winner_mayor", "mode"]
-    conn = db()
-    cur = conn.cursor()
-    for key in allowed:
-        if key in data:
-            cur.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?,?)", (key, str(data[key])))
-    conn.commit()
-    settings = get_settings(conn)
-    conn.close()
-    return jsonify({"ok": True, "settings": settings})
-
-@app.get("/api/election-data")
-@admin_required
-def get_election_data_admin():
-    return jsonify({"ok": True, "data": ELECTION_DATA})
-
-@app.post("/api/election-data")
-@admin_required
-def save_election_data_admin():
-    global ELECTION_DATA
-    data = request.get_json(force=True).get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("mayors"), list) or not isinstance(data.get("lists"), dict):
-        return jsonify({"ok": False, "error": "Formato non valido: servono mayors[] e lists{}"}), 400
-    for list_name, obj in data["lists"].items():
-        if not isinstance(obj, dict) or not obj.get("coalition") or not isinstance(obj.get("candidates"), list):
-            return jsonify({"ok": False, "error": f"Lista non valida: {list_name}"}), 400
-    ELECTION_DATA = data
-    conn = db()
-    conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('election_data_json', ?)", (json.dumps(data, ensure_ascii=False),))
-    conn.commit(); conn.close()
-    return jsonify({"ok": True, "message": "Liste e candidati aggiornati"})
+def create_user_api():
+    tid=tenant_query_id(); data=request.get_json(force=True); name=str(data.get("name","")).strip(); phone=str(data.get("phone","")).strip(); pin=str(data.get("pin","")).strip(); role=str(data.get("role","rappresentante")).strip(); section=str(data.get("section","")).strip() or None
+    if role=="superadmin": return jsonify({"ok":False,"error":"Non puoi creare SuperAdmin da qui"}),403
+    if not name or not phone or not pin: return jsonify({"ok":False,"error":"Nome, codice/telefono e PIN obbligatori"}),400
+    allowed="|".join(data.get("allowed_lists",[]) if isinstance(data.get("allowed_lists",[]),list) else [])
+    conn=db(); conn.execute("INSERT INTO users(tenant_id,name,phone,pin_hash,qr_token,role,section,allowed_lists,active,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)",(tid,name,phone,generate_password_hash(pin),secrets.token_urlsafe(24),role,section,allowed,now())); audit(conn,tid,current_user()["id"],"create_user","users",data); conn.commit(); conn.close(); return jsonify({"ok":True})
 
 @app.post("/api/reset-votes")
 @admin_required
 def reset_votes():
-    data = request.get_json(force=True)
-    confirm = str(data.get("confirm", "")).strip()
-    if confirm != "AZZERA":
-        return jsonify({"ok": False, "error": "Conferma non valida. Scrivere AZZERA."}), 400
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM votes")
-    cur.execute("DELETE FROM reports")
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "message": "Voti azzerati"})
+    tid=tenant_query_id(); confirm=str(request.get_json(force=True).get("confirm","")).strip()
+    if confirm!="AZZERA": return jsonify({"ok":False,"error":"Scrivere AZZERA"}),400
+    conn=db(); conn.execute("DELETE FROM votes WHERE tenant_id=?",(tid,)); conn.execute("DELETE FROM reports WHERE tenant_id=?",(tid,)); audit(conn,tid,current_user()["id"],"reset_votes","reports"); conn.commit(); conn.close(); return jsonify({"ok":True,"message":"Voti del tenant azzerati"})
 
-@app.get("/api/users")
+# AI / BI
+
+def _aggregate(conn: sqlite3.Connection, tid:int) -> Dict[str,Any]:
+    ed=get_election_data(conn,tid); settings=get_tenant_settings(conn,tid)
+    reps=conn.execute("SELECT * FROM reports WHERE tenant_id=? ORDER BY CAST(section AS INTEGER), section",(tid,)).fetchall()
+    rows=conn.execute("SELECT v.*, r.section, r.voters, r.closed FROM votes v JOIN reports r ON r.id=v.report_id WHERE v.tenant_id=?",(tid,)).fetchall()
+    list_tot={}; mayor_tot={}; pref_tot={}; sections={}
+    for r in reps: sections[r["section"]]={"section":r["section"],"voters":r["voters"],"closed":bool(r["closed"]),"valid_lists":0,"valid_mayors":0,"blank":r["blank_ballots"],"null":r["null_ballots"]}
+    for v in rows:
+        sec=v["section"]; votes=int(v["votes"] or 0)
+        if v["vote_type"]=="lista": list_tot[v["list_name"]]=list_tot.get(v["list_name"],0)+votes; sections.setdefault(sec,{"section":sec,"voters":v["voters"],"closed":bool(v["closed"]),"valid_lists":0,"valid_mayors":0})["valid_lists"]+=votes
+        elif v["vote_type"]=="sindaco": mayor_tot[v["name"]]=mayor_tot.get(v["name"],0)+votes; sections.setdefault(sec,{"section":sec,"voters":v["voters"],"closed":bool(v["closed"]),"valid_lists":0,"valid_mayors":0})["valid_mayors"]+=votes
+        elif v["vote_type"]=="preferenza": pref_tot[(v["list_name"],v["name"])]=pref_tot.get((v["list_name"],v["name"]),0)+votes
+    return {"election_data":ed,"settings":settings,"reports":[dict(r) for r in reps],"sections":list(sections.values()),"list_totals":list_tot,"mayor_totals":mayor_tot,"pref_totals":pref_tot}
+
+
+def ai_payload(conn: sqlite3.Connection, tid:int) -> Dict[str,Any]:
+    ag=_aggregate(conn,tid); sections=ag["sections"]; total_voters=sum(s.get("voters",0) for s in sections); total_lists=sum(ag["list_totals"].values()); total_mayors=sum(ag["mayor_totals"].values())
+    heat=[]
+    for s in sections:
+        voters=s.get("voters",0); invalid=s.get("blank",0)+s.get("null",0); valid=s.get("valid_lists",0) or s.get("valid_mayors",0)
+        heat.append({**s,"valid_votes":valid,"invalid_rate_pct":round(invalid/voters*100,2) if voters else 0,"turnout_on_observed_pct":round(voters/total_voters*100,2) if total_voters else 0})
+    # Bayesian/Laplace projection
+    target=ag["settings"].get("total_voters") or max(total_voters,total_lists,total_mayors)
+    missing=max(0,target-total_lists)
+    k=max(1,len(ag["list_totals"]))
+    bayes_lists=[]
+    for name,val in ag["list_totals"].items():
+        p=(val+1)/(total_lists+k) if total_lists+k else 0
+        bayes_lists.append({"name":name,"current":val,"probability_pct":round(p*100,2),"projected":round(val+missing*p),"method":"Laplace/Bayes multinomiale"})
+    bayes_lists.sort(key=lambda x:x["projected"], reverse=True)
+    # ML turnout regression over section index
+    ml={"available":SKLEARN_AVAILABLE,"turnout_regression":[],"winner_prediction":None,"clusters":[],"anomalies":[]}
+    if sections:
+        xs=[]; y=[]
+        for i,s in enumerate(sections,1):
+            try: idx=float(str(s["section"]).replace("bis",".5"))
+            except Exception: idx=float(i)
+            xs.append([idx, 1 if s.get("closed") else 0, s.get("valid_lists",0)]); y.append(float(s.get("voters",0)))
+        if SKLEARN_AVAILABLE and len(xs)>=2:
+            X=np.array(xs); Y=np.array(y); model=LinearRegression().fit(X,Y)
+            for i,s in enumerate(sections,1):
+                pred=max(0,float(model.predict(np.array([xs[i-1]]))[0])); ml["turnout_regression"].append({"section":s["section"],"actual_voters":s.get("voters",0),"predicted_voters":round(pred,1),"residual":round(s.get("voters",0)-pred,1)})
+            if len(sections)>=3:
+                features=np.array([[s.get("voters",0),s.get("valid_lists",0),s.get("invalid_rate_pct",0)] for s in heat])
+                n=min(3,len(sections)); labels=KMeans(n_clusters=n, n_init=10, random_state=7).fit_predict(features)
+                for lab,s in zip(labels,heat): ml["clusters"].append({"section":s["section"],"cluster":int(lab),"profile":"alta intensità" if s.get("voters",0)> (total_voters/len(sections) if sections else 0) else "bassa/media intensità"})
+        avg_invalid=sum(h["invalid_rate_pct"] for h in heat)/len(heat) if heat else 0
+        for h in heat:
+            if h["invalid_rate_pct"] > avg_invalid+8 or (total_voters and h.get("voters",0)>2*(total_voters/len(heat))):
+                ml["anomalies"].append({"section":h["section"],"reason":"scostamento statistico su invalidità/affluenza", "invalid_rate_pct":h["invalid_rate_pct"], "voters":h.get("voters",0)})
+    if bayes_lists: ml["winner_prediction"]={"leader":bayes_lists[0]["name"],"projected_votes":bayes_lists[0]["projected"],"confidence":"media" if len(sections)>=5 else "bassa: poche sezioni caricate"}
+    # political weight
+    political=[]
+    for (lname,cand),votes in ag["pref_totals"].items():
+        ltot=ag["list_totals"].get(lname,0); score=min(100, round((votes/(ltot or 1))*55 + math.log1p(votes)*9,2))
+        political.append({"candidate":cand,"list":lname,"preferences":votes,"list_total":ltot,"preference_on_list_pct":round(votes/(ltot or 1)*100,2),"body_index":score})
+    political.sort(key=lambda x:(-x["body_index"],-x["preferences"]))
+    return {"ok":True,"tenant_id":tid,"summary":{"sections_loaded":len(sections),"sections_closed":sum(1 for s in sections if s.get("closed")),"observed_voters":total_voters,"total_list_votes":total_lists,"total_mayor_votes":total_mayors,"sklearn_available":SKLEARN_AVAILABLE},"heatmap":heat,"prediction":{"lists":bayes_lists,"method":"proiezione Bayes/Laplace con target votanti configurato; non è un sondaggio"},"machine_learning":ml,"political_weight":political,"social_cards":[{"rank":i+1,**p,"political_score":p["body_index"],"share_text":f"{p['candidate']} · {p['list']} · Political Score {p['body_index']}/100"} for i,p in enumerate(political[:50])],"data":ag["election_data"]}
+
+@app.get("/api/intelligence")
 @admin_required
-def users():
-    conn = db()
-    rows = conn.execute("SELECT id, name, phone, role, section, allowed_lists, qr_token, active FROM users ORDER BY id").fetchall()
-    conn.close()
-    # Ritorna anche l'elenco delle liste caricate: serve al pannello admin
-    # per abilitare rapidamente le liste su cui ogni rilevatore può inserire voti.
-    return jsonify({
-        "ok": True,
-        "users": [dict(row) for row in rows],
-        "lists": sorted(list(ELECTION_DATA.get("lists", {}).keys()))
-    })
-
-@app.post("/api/users")
+@module_required("intelligence")
+def intelligence():
+    tid=tenant_query_id(); conn=db(); p=ai_payload(conn,tid); conn.close(); return jsonify(p)
+@app.get("/api/public-dashboard")
+def public_dash():
+    tid=int(request.args.get("tenant_id") or 1); conn=db(); p=ai_payload(conn,tid); conn.close(); return jsonify({"ok":True,"tenant_id":tid,"summary":p["summary"],"heatmap":p["heatmap"],"prediction":p["prediction"],"social_cards":p["social_cards"][:30]})
+@app.get("/api/ai/predictive")
 @admin_required
-def create_user():
-    data = request.get_json(force=True)
-    name = str(data.get("name", "")).strip()
-    phone = str(data.get("phone", "")).strip()
-    pin = str(data.get("pin", "")).strip()
-    section = str(data.get("section", "")).strip() or None
-    role = str(data.get("role", "rappresentante")).strip()
-    allowed_lists = "|".join(data.get("allowed_lists", []) if isinstance(data.get("allowed_lists", []), list) else [x.strip() for x in str(data.get("allowed_lists", "")).split("|") if x.strip()])
-    if not name or not phone or not pin:
-        return jsonify({"ok": False, "error": "Nome, telefono/codice e PIN sono obbligatori"}), 400
-    conn = db()
-    try:
-        conn.execute("INSERT INTO users(name, phone, pin_hash, qr_token, role, section, allowed_lists, active, created_at) VALUES(?,?,?,?,?,?,?,1,?)", (name, phone, generate_password_hash(pin), secrets.token_urlsafe(24), role, section, allowed_lists, datetime.now().isoformat(timespec="seconds")))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
-        return jsonify({"ok": False, "error": "Telefono/codice gia' esistente"}), 409
-    conn.close()
-    return jsonify({"ok": True})
-
-
-
-
-
-
-
-
-
-def _norm(value):
-    value = str(value or "").strip().lower()
-    value = value.replace("’", "'").replace("`", "'").replace("´", "'")
-    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    value = re.sub(r"[^a-z0-9]+", "", value)
-    return value
-
-def _tokens(value):
-    value = str(value or "").strip().lower()
-    value = value.replace("’", "'").replace("`", "'").replace("´", "'")
-    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    tokens = re.findall(r"[a-z0-9]+", value)
-    stop = {"detto","detta","di","de","del","della","dei","degli","delle","il","la","lo","le","i","gli","un","una","e","ed","con","per","sindaco","sindaca","lista"}
-    return [t for t in tokens if t not in stop and len(t) > 1]
-
-def _contains_flexible(csv_value, app_value):
-    ck = _norm(csv_value)
-    ak = _norm(app_value)
-    if not ck or not ak:
-        return False
-    if ck == ak or ck in ak or ak in ck:
-        return True
-    ct = _tokens(csv_value)
-    at = _tokens(app_value)
-    if not ct or not at:
-        return False
-    csv_in_app = all(any(c == a or c in a or a in c for a in at) for c in ct)
-    app_in_csv = all(any(a == c or a in c or c in a for c in ct) for a in at)
-    return csv_in_app or app_in_csv
-
-def _list_alias(key):
-    aliases = {
-        "movimento2050": "movimento5stelle",
-        "movimento5stelle": "movimento5stelle",
-        "m5s": "movimento5stelle",
-        "pd": "partitodemocratico",
-        "partitodemocratico": "partitodemocratico",
-        "cittaaperta": "cittaapertacontrocorrente",
-        "cittaapertacontrocorrente": "cittaapertacontrocorrente"
-    }
-    return aliases.get(key, key)
-
-def _resolve_list(raw_name, raw_number=None):
-    # Match per Nome Lista: numero lista usato solo se nessun nome combacia.
-    raw_key = _list_alias(_norm(raw_name))
-    matches = []
-    for name in ELECTION_DATA["lists"].keys():
-        app_key = _list_alias(_norm(name))
-        if app_key == raw_key:
-            return name
-        if _contains_flexible(raw_name, name):
-            matches.append(name)
-    if matches:
-        if len(matches) == 1:
-            return matches[0]
-        raw_tokens = set(_tokens(raw_name))
-        matches.sort(key=lambda n: len(raw_tokens & set(_tokens(n))), reverse=True)
-        return matches[0]
-    try:
-        n = int(str(raw_number or "").strip())
-        lists = list(ELECTION_DATA["lists"].keys())
-        if 1 <= n <= len(lists):
-            return lists[n-1]
-    except Exception:
-        pass
-    return None
-
-def _resolve_mayor(raw_name, raw_number=None):
-    matches = [m for m in ELECTION_DATA["mayors"] if _contains_flexible(raw_name, m)]
-    if matches:
-        if len(matches) == 1:
-            return matches[0]
-        raw_tokens = set(_tokens(raw_name))
-        matches.sort(key=lambda n: len(raw_tokens & set(_tokens(n))), reverse=True)
-        return matches[0]
-    try:
-        n = int(str(raw_number or "").strip())
-        mayors = ELECTION_DATA["mayors"]
-        if 1 <= n <= len(mayors):
-            return mayors[n-1]
-    except Exception:
-        pass
-    return None
-
-def _resolve_candidate(list_name, raw_name, raw_number=None):
-    candidates = ELECTION_DATA["lists"].get(list_name, {}).get("candidates", [])
-    if not candidates:
-        return None
-
-    matches = []
-    for cand in candidates:
-        try:
-            if _contains_flexible(raw_name, cand):
-                matches.append(cand)
-        except Exception:
-            pass
-
-    if not matches:
-        raw_tokens = set(_tokens(raw_name))
-        for cand in candidates:
-            cand_tokens = set(_tokens(cand))
-            if not raw_tokens or not cand_tokens:
-                continue
-            common = raw_tokens & cand_tokens
-            min_required = 1 if min(len(raw_tokens), len(cand_tokens)) <= 1 else 2
-            if len(common) >= min_required:
-                matches.append(cand)
-
-    if matches:
-        if len(matches) == 1:
-            return matches[0]
-        raw_tokens = set(_tokens(raw_name))
-        def _score(cand):
-            cand_tokens = set(_tokens(cand))
-            common = raw_tokens & cand_tokens
-            return (len(common), len(common) / max(len(raw_tokens), 1), -abs(len(cand_tokens) - len(raw_tokens)))
-        matches.sort(key=_score, reverse=True)
-        return matches[0]
-
-    try:
-        n = int(str(raw_number or "").strip())
-        if 1 <= n <= len(candidates):
-            return candidates[n - 1]
-    except Exception:
-        pass
-
-    return None
-
-def _ensure_report(cur, section, user_id):
-    """
-    Garantisce un solo report per sezione/TOTALE.
-    Se esiste, aggiorna updated_at e restituisce l'id.
-    Se non esiste, crea il report base.
-    """
-    now = datetime.now().isoformat(timespec="seconds")
-    section = str(section or "").strip() or "TOTALE"
-
-    row = cur.execute(
-        "SELECT id FROM reports WHERE section=? ORDER BY id DESC LIMIT 1",
-        (section,)
-    ).fetchone()
-
-    if row:
-        cur.execute(
-            "UPDATE reports SET user_id=?, updated_at=? WHERE id=?",
-            (user_id, now, row["id"])
-        )
-        return row["id"]
-
-    cur.execute(
-        "INSERT INTO reports(user_id, section, voters, blank_ballots, null_ballots, contested_ballots, closed, closed_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (user_id, section, 0, 0, 0, 0, 0, None, now, now)
-    )
-    report_id = cur.lastrowid
-
-    for mayor in ELECTION_DATA["mayors"]:
-        _upsert_vote(cur, report_id, "sindaco", mayor, 0, None)
-
-    for list_name, obj in ELECTION_DATA["lists"].items():
-        _upsert_vote(cur, report_id, "lista", list_name, 0, list_name)
-        for cand in obj.get("candidates", []):
-            _upsert_vote(cur, report_id, "preferenza", cand, 0, list_name)
-
-    return report_id
-
-def _upsert_vote(cur, report_id, vote_type, name, votes, list_name=None):
-    """
-    UPDATE dei voti importati via CSV.
-    Inserisce solo se il record non esiste.
-    """
-    votes = int(votes or 0)
-
-    rows = cur.execute(
-        """
-        SELECT id FROM votes
-        WHERE report_id=?
-          AND vote_type=?
-          AND COALESCE(list_name,'')=COALESCE(?, '')
-          AND name=?
-        ORDER BY id ASC
-        """,
-        (report_id, vote_type, list_name, name)
-    ).fetchall()
-
-    if rows:
-        keep_id = rows[0]["id"]
-        cur.execute("UPDATE votes SET votes=? WHERE id=?", (votes, keep_id))
-
-        for duplicate in rows[1:]:
-            cur.execute("DELETE FROM votes WHERE id=?", (duplicate["id"],))
-
-        return keep_id
-
-    cur.execute(
-        "INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)",
-        (report_id, vote_type, list_name, name, votes)
-    )
-    return cur.lastrowid
-
-def _intv(value, default=0):
-    """
-    Conversione robusta a intero:
-    - gestisce None;
-    - stringhe vuote;
-    - virgole/punti/spazi;
-    - ritorna default in caso di errore.
-    """
-    try:
-        if value is None:
-            return default
-
-        text = str(value).strip()
-
-        if not text:
-            return default
-
-        text = text.replace(".", "").replace(",", ".")
-
-        return int(float(text))
-    except Exception:
-        return default
-
-
-def _read_csv_file(max_rows=10000, preferred_delimiter=None):
-    """
-    Lettura CSV standardizzata per tutti gli import.
-    Accetta automaticamente CSV separati da ; oppure da ,.
-    Per l'importazione prioritaria sindaci il formato consigliato è:
-    Numero Sindaco;Candidato Sindaco
-    """
-    if "file" not in request.files:
-        raise ValueError("File CSV mancante")
-
-    uploaded = request.files["file"]
-
-    raw = uploaded.read()
-
-    if not raw:
-        raise ValueError("File CSV vuoto")
-
-    if len(raw) > 5 * 1024 * 1024:
-        raise ValueError("File troppo grande (max 5MB)")
-
-    text = raw.decode("utf-8-sig", errors="ignore")
-
-    sample = "\n".join([line for line in text.splitlines() if line.strip()][:5])
-    if preferred_delimiter in (";", ","):
-        delimiter = preferred_delimiter
-    else:
-        try:
-            delimiter = csv.Sniffer().sniff(sample, delimiters=";,").delimiter
-        except Exception:
-            first = sample.splitlines()[0] if sample else ""
-            delimiter = "," if first.count(",") > first.count(";") else ";"
-
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-
-    rows = []
-
-    for row in reader:
-        cleaned = [str(x).strip() for x in row]
-
-        if any(cleaned):
-            rows.append(cleaned)
-
-    if not rows:
-        raise ValueError("CSV senza dati")
-
-    if len(rows) > max_rows:
-        raise ValueError(f"CSV troppo grande. Massimo {max_rows} righe")
-
-    # Rimozione automatica intestazione
-    first_line = delimiter.join(rows[0]).lower()
-
-    header_keywords = [
-        "sezione",
-        "numero liste",
-        "nome lista",
-        "voti validi",
-        "numero sind",
-        "numero sindaco",
-        "candidato sindaco",
-        "numero cons",
-        "numero candidato",
-        "nome cons",
-        "nome candidato",
-        "schede nulle",
-        "schede bianche"
-    ]
-
-    if any(k in first_line for k in header_keywords):
-        rows = rows[1:]
-
-    return rows
-
-
-
-def _save_election_data_to_settings():
-    """Persistenza delle anagrafiche elettorali aggiornate dall'amministratore."""
-    conn = db()
-    conn.execute(
-        "INSERT OR REPLACE INTO settings(key, value) VALUES('election_data_json', ?)",
-        (json.dumps(ELECTION_DATA, ensure_ascii=False),)
-    )
-    conn.commit()
-    conn.close()
-
-
-def _ensure_mayor_votes_for_existing_reports(mayor_names):
-    """Aggiunge i candidati sindaco importati anche ai report/sezioni già creati."""
-    conn = db()
-    cur = conn.cursor()
-    rows = cur.execute("SELECT id FROM reports").fetchall()
-    for report in rows:
-        for mayor in mayor_names:
-            _upsert_vote(cur, report["id"], "sindaco", mayor, 0, None)
-    conn.commit()
-    conn.close()
-
-
-def _ensure_list_votes_for_existing_reports():
-    """
-    Dopo l'import anagrafico di liste/consiglieri, aggiunge record voto a zero
-    ai report già presenti. Serve quando l'admin crea prima le sezioni e poi
-    carica l'anagrafica definitiva.
-    """
-    conn = db()
-    cur = conn.cursor()
-    rows = cur.execute("SELECT id FROM reports").fetchall()
-    for report in rows:
-        for list_name, obj in ELECTION_DATA.get("lists", {}).items():
-            _upsert_vote(cur, report["id"], "lista", list_name, 0, list_name)
-            for cand in obj.get("candidates", []):
-                _upsert_vote(cur, report["id"], "preferenza", cand, 0, list_name)
-    conn.commit()
-    conn.close()
-
-def _import_votes(kind, by_section):
-    try:
-        rows = _read_csv_file()
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"Errore lettura CSV: {str(exc)}"}), 400
-
-    admin_user = current_user()
-    if not admin_user:
-        return jsonify({"ok": False, "error": "Utente amministratore non riconosciuto"}), 401
-
-    conn = db()
-    cur = conn.cursor()
-    imported = 0
-    skipped = 0
-    errors = []
-    # Per import preferenze totali/per sezione: accumula i voti dei consiglieri per lista
-    # per aggiornare anche i voti della lista collegata.
-    list_totals_from_preferences = {}
-
-    try:
-        for idx, row in enumerate(rows, start=1):
-            try:
-                if not row or not any(str(x).strip() for x in row):
-                    skipped += 1
-                    continue
-
-                section = "TOTALE"
-                off = 0
-                if by_section:
-                    if len(row) < 1 or not str(row[0]).strip():
-                        raise ValueError("sezione mancante")
-                    section = str(row[0]).strip()
-                    off = 1
-
-                report_id = _ensure_report(cur, section, admin_user["id"])
-
-                if kind == "liste":
-                    if len(row) < off + 3:
-                        raise ValueError("formato richiesto: [Sezione;]Numero Liste;Nome Lista;Voti validi")
-                    nome_lista = str(row[off + 1]).strip()
-                    list_name = _resolve_list(nome_lista, row[off])
-                    if not list_name:
-                        raise ValueError(f"Nome Lista non trovato in app.py: {nome_lista}")
-                    votes = _intv(row[off + 2])
-                    _upsert_vote(cur, report_id, "lista", list_name, votes, list_name)
-                    imported += 1
-
-                elif kind == "sindaci":
-                    if len(row) < off + 4:
-                        raise ValueError("formato richiesto: [Sezione;]Numero Sindaco;Candidato Sindaco;Voti validi;Voti solo Sind")
-                    nome_sindaco = str(row[off + 1]).strip()
-                    mayor = _resolve_mayor(nome_sindaco, row[off])
-                    if not mayor:
-                        raise ValueError(f"Candidato Sindaco non trovato in app.py: {nome_sindaco}")
-                    votes = _intv(row[off + 2])
-                    only = _intv(row[off + 3])
-                    _upsert_vote(cur, report_id, "sindaco", mayor, votes + only, None)
-                    imported += 1
-
-                elif kind == "consiglieri":
-                    if len(row) < off + 5:
-                        raise ValueError("formato richiesto: [Sezione;]Numero Liste;Nome Lista;Numero Candidato;Nome Candidato;Voti validi")
-                    nome_lista = str(row[off + 1]).strip()
-                    list_name = _resolve_list(nome_lista, row[off])
-                    if not list_name:
-                        raise ValueError(f"Nome Lista non trovato in app.py: {nome_lista}")
-                    nome_cons = str(row[off + 3]).strip()
-                    candidate = _resolve_candidate(list_name, nome_cons, row[off + 2])
-                    if not candidate:
-                        raise ValueError(f"Nome Candidato non trovato in app.py per lista {list_name}: {nome_cons}")
-                    votes = _intv(row[off + 4])
-                    _upsert_vote(cur, report_id, "preferenza", candidate, votes, list_name)
-                    list_totals_from_preferences[(report_id, list_name)] = list_totals_from_preferences.get((report_id, list_name), 0) + votes
-                    imported += 1
-
-                elif kind == "schede":
-                    if len(row) < off + 4:
-                        raise ValueError("formato richiesto: [Sezione;]Voti nulli;Schede nulle;Schede bianche;V.cont.NoAss.")
-                    voti_nulli = _intv(row[off])
-                    schede_nulle = _intv(row[off + 1])
-                    schede_bianche = _intv(row[off + 2])
-                    v_cont_no_ass = _intv(row[off + 3])
-                    now = datetime.now().isoformat(timespec="seconds")
-                    cur.execute(
-                        "UPDATE reports SET null_ballots=?, blank_ballots=?, updated_at=? WHERE id=?",
-                        (voti_nulli + schede_nulle + v_cont_no_ass, schede_bianche, now, report_id)
-                    )
-                    imported += 1
-
-            except Exception as exc:
-                skipped += 1
-                if len(errors) < 50:
-                    errors.append(f"Riga {idx}: {str(exc)}")
-
-        # Se il file importato contiene preferenze consiglieri, aggiorna anche i voti
-        # delle liste collegate. In questo modo i grafici liste/statistiche si aggiornano
-        # automaticamente anche caricando solo il CSV delle preferenze.
-        if kind == "consiglieri":
-            for (report_id, list_name), total_votes in list_totals_from_preferences.items():
-                _upsert_vote(cur, report_id, "lista", list_name, total_votes, list_name)
-
-        conn.commit()
-
-    except Exception as exc:
-        conn.rollback()
-        conn.close()
-        return jsonify({"ok": False, "error": f"Errore import {kind}: {str(exc)}"}), 500
-
-    conn.close()
-    return jsonify({
-        "ok": True,
-        "imported": imported,
-        "skipped": skipped,
-        "errors": errors,
-        "message": f"Import completato. Righe assegnate {imported}, righe saltate {skipped}."
-    })
-
-
-@app.post("/api/import/sindaci-priority")
-@admin_required
-def import_sindaci_priority():
-    """
-    Importazione prioritaria dell'anagrafica candidati sindaco.
-    Formato CSV obbligatorio: Numero Sindaco;Candidato Sindaco
-    Sostituisce l'elenco dei candidati sindaco mantenendo liste, coalizioni e consiglieri già presenti.
-    """
-    global ELECTION_DATA
-    try:
-        rows = _read_csv_file(max_rows=1000, preferred_delimiter=";")
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"Errore lettura CSV: {str(exc)}"}), 400
-
-    parsed = []
-    skipped = 0
-    errors = []
-    seen = set()
-
-    for idx, row in enumerate(rows, start=1):
-        try:
-            if len(row) < 2:
-                raise ValueError("formato richiesto: Numero Sindaco;Candidato Sindaco")
-            raw_number = str(row[0]).strip()
-            name = str(row[1]).strip()
-            if not name:
-                raise ValueError("Candidato Sindaco mancante")
-            norm = _norm(name)
-            if norm in seen:
-                skipped += 1
-                continue
-            seen.add(norm)
-            try:
-                order = int(raw_number)
-            except Exception:
-                order = 999999 + idx
-            parsed.append((order, idx, name.upper()))
-        except Exception as exc:
-            skipped += 1
-            if len(errors) < 50:
-                errors.append(f"Riga {idx}: {str(exc)}")
-
-    if not parsed:
-        return jsonify({"ok": False, "error": "Nessun candidato sindaco valido trovato nel CSV", "errors": errors}), 400
-
-    parsed.sort(key=lambda item: (item[0], item[1]))
-    ELECTION_DATA["mayors"] = [name for _, __, name in parsed]
-    _save_election_data_to_settings()
-    # Imposta automaticamente il primo sindaco come valore provvisorio per
-    # statistiche/seggi; l'admin può modificarlo in seguito dalle impostazioni.
-    conn_tmp = db()
-    conn_tmp.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('winner_mayor', ?)", (ELECTION_DATA["mayors"][0] if ELECTION_DATA["mayors"] else "",))
-    conn_tmp.commit(); conn_tmp.close()
-    _ensure_mayor_votes_for_existing_reports(ELECTION_DATA["mayors"])
-
-    return jsonify({
-        "ok": True,
-        "imported": len(ELECTION_DATA["mayors"]),
-        "skipped": skipped,
-        "errors": errors,
-        "message": f"Importazione prioritaria sindaci completata. Candidati sindaco aggiornati: {len(ELECTION_DATA['mayors'])}. Righe saltate: {skipped}."
-    })
-
-@app.post("/api/import/consiglieri-priority")
-@admin_required
-def import_consiglieri_priority():
-    """
-    Importazione prioritaria dell'anagrafica liste/coalizioni/consiglieri.
-    Formato CSV obbligatorio:
-    Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato
-
-    Nota: non importa voti. Serve a costruire la base dati elettorale su cui
-    poi lavorano inserimento manuale, grafici e moduli premium.
-    """
-    global ELECTION_DATA
-    try:
-        rows = _read_csv_file(max_rows=10000, preferred_delimiter=";")
-    except ValueError as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"Errore lettura CSV: {str(exc)}"}), 400
-
-    lists = {}
-    skipped = 0
-    errors = []
-
-    for idx, row in enumerate(rows, start=1):
-        try:
-            if len(row) < 5:
-                raise ValueError("formato richiesto: Numero Lista;Nome Lista;Coalizione;Numero Candidato;Nome Candidato")
-            list_number = str(row[0]).strip()
-            list_name = str(row[1]).strip().upper()
-            coalition_raw = str(row[2]).strip().upper()
-            candidate_number = str(row[3]).strip()
-            candidate_name = str(row[4]).strip().upper()
-            if not list_name or not coalition_raw or not candidate_name:
-                raise ValueError("Nome Lista, Coalizione e Nome Candidato sono obbligatori")
-
-            # Normalizza la coalizione sul nome del candidato sindaco, se già
-            # presente nell'anagrafica sindaci; altrimenti conserva il testo CSV.
-            coalition = _resolve_mayor(coalition_raw) or coalition_raw
-
-            if list_name not in lists:
-                lists[list_name] = {"number": list_number, "coalition": coalition, "candidates": [], "_seen": set()}
-
-            norm_cand = _norm(candidate_name)
-            if norm_cand in lists[list_name]["_seen"]:
-                skipped += 1
-                continue
-            lists[list_name]["_seen"].add(norm_cand)
-            try:
-                order = int(candidate_number)
-            except Exception:
-                order = 999999 + idx
-            lists[list_name]["candidates"].append((order, idx, candidate_name))
-        except Exception as exc:
-            skipped += 1
-            if len(errors) < 50:
-                errors.append(f"Riga {idx}: {str(exc)}")
-
-    if not lists:
-        return jsonify({"ok": False, "error": "Nessuna lista/candidato consigliere valido trovato nel CSV", "errors": errors}), 400
-
-    clean_lists = {}
-    for list_name, obj in lists.items():
-        ordered_candidates = [name for _, __, name in sorted(obj["candidates"], key=lambda x: (x[0], x[1]))]
-        clean_lists[list_name] = {"number": obj.get("number", ""), "coalition": obj["coalition"], "candidates": ordered_candidates}
-
-    ELECTION_DATA["lists"] = clean_lists
-    _save_election_data_to_settings()
-    _ensure_list_votes_for_existing_reports()
-
-    return jsonify({
-        "ok": True,
-        "imported": sum(len(v["candidates"]) for v in clean_lists.values()),
-        "lists": len(clean_lists),
-        "skipped": skipped,
-        "errors": errors,
-        "message": f"Importazione prioritaria consiglieri/liste completata. Liste: {len(clean_lists)}. Candidati: {sum(len(v['candidates']) for v in clean_lists.values())}. Righe saltate: {skipped}."
-    })
-
-
-@app.post("/api/import/liste")
-@admin_required
-def import_liste_totali():
-    return _import_votes("liste", False)
-
-@app.post("/api/import/liste-sezioni")
-@admin_required
-def import_liste_sezioni():
-    return _import_votes("liste", True)
-
-@app.post("/api/import/sindaci")
-@admin_required
-def import_sindaci_totali():
-    return _import_votes("sindaci", False)
-
-@app.post("/api/import/sindaci-sezioni")
-@admin_required
-def import_sindaci_sezioni():
-    return _import_votes("sindaci", True)
-
-@app.post("/api/import/consiglieri")
-@admin_required
-def import_consiglieri_totali():
-    return _import_votes("consiglieri", False)
-
-@app.post("/api/import/consiglieri-sezioni")
-@admin_required
-def import_consiglieri_sezioni():
-    return _import_votes("consiglieri", True)
-
-@app.post("/api/import/schede")
-@admin_required
-def import_schede_totali():
-    return _import_votes("schede", False)
-
-@app.post("/api/import/schede-sezioni")
-@admin_required
-def import_schede_sezioni():
-    return _import_votes("schede", True)
-
-@app.post("/api/sections/import-csv")
-@admin_required
-def import_sections_csv():
-    if "file" not in request.files:
-        return jsonify({"ok": False, "error": "File CSV mancante"}), 400
-
-    uploaded_file = request.files["file"]
-
-    try:
-        raw = uploaded_file.read()
-        if len(raw) > 512 * 1024:
-            return jsonify({"ok": False, "error": "File troppo grande. Limite massimo: 512 KB"}), 400
-        content = raw.decode("utf-8-sig", errors="ignore")
-    except Exception:
-        return jsonify({"ok": False, "error": "Impossibile leggere il file CSV"}), 400
-
-    if not content.strip():
-        return jsonify({"ok": False, "error": "CSV vuoto"}), 400
-
-    reader = csv.reader(io.StringIO(content), delimiter=";")
-    rows = []
-    for row in reader:
-        cleaned = [cell.strip() for cell in row]
-        if any(cleaned):
-            rows.append(cleaned)
-
-    if not rows:
-        return jsonify({"ok": False, "error": "CSV vuoto"}), 400
-
-    first = ";".join(rows[0]).lower().replace(" ", "")
-    if first.startswith("sezione;") or "elettori" in first or "votanti" in first:
-        rows = rows[1:]
-
-    imported = 0
-    updated = 0
-    skipped = 0
-    errors = []
-    now = datetime.now().isoformat(timespec="seconds")
-
-    conn = db()
-    cur = conn.cursor()
-    admin_user = current_user()
-
-    try:
-        for idx, row in enumerate(rows, start=1):
-            if len(row) < 3:
-                skipped += 1
-                errors.append(f"Riga {idx}: formato richiesto Sezione;Elettori;Votanti")
-                continue
-
-            section = row[0].strip()
-            try:
-                section_electors = int(str(row[1]).replace(".", "").replace(",", "").strip() or 0)
-                voters = int(str(row[2]).replace(".", "").replace(",", "").strip() or 0)
-            except ValueError:
-                skipped += 1
-                errors.append(f"Riga {idx}: elettori o votanti non numerici")
-                continue
-
-            if not section:
-                skipped += 1
-                errors.append(f"Riga {idx}: sezione mancante")
-                continue
-
-            existing = cur.execute("SELECT id, closed FROM reports WHERE section=?", (section,)).fetchone()
-
-            if existing:
-                # Aggiorna solo elettori e votanti, preservando bianche, nulle, voti e stato chiusura.
-                cur.execute(
-                    "UPDATE reports SET voters=?, contested_ballots=?, updated_at=? WHERE section=?",
-                    (voters, section_electors, now, section)
-                )
-                updated += 1
-            else:
-                # Crea record base per la sezione. I voti saranno inseriti/aggiornati in seguito.
-                cur.execute(
-                    "INSERT INTO reports(user_id, section, voters, blank_ballots, null_ballots, contested_ballots, closed, closed_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (admin_user["id"], section, voters, 0, 0, section_electors, 0, None, now, now)
-                )
-                report_id = cur.lastrowid
-
-                for name in ELECTION_DATA["mayors"]:
-                    cur.execute(
-                        "INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)",
-                        (report_id, "sindaco", None, name, 0)
-                    )
-
-                for list_name, list_obj in ELECTION_DATA["lists"].items():
-                    cur.execute(
-                        "INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)",
-                        (report_id, "lista", list_name, list_name, 0)
-                    )
-
-                    for candidate in list_obj["candidates"]:
-                        cur.execute(
-                            "INSERT INTO votes(report_id, vote_type, list_name, name, votes) VALUES(?,?,?,?,?)",
-                            (report_id, "preferenza", list_name, candidate, 0)
-                        )
-
-                imported += 1
-
-        conn.commit()
-
-    except Exception as exc:
-        conn.rollback()
-        conn.close()
-        return jsonify({"ok": False, "error": f"Errore import sezioni CSV: {str(exc)}"}), 500
-
-    conn.close()
-
-    return jsonify({
-        "ok": True,
-        "imported": imported,
-        "updated": updated,
-        "skipped": skipped,
-        "errors": errors[:10],
-        "message": f"Import sezioni completato. Create {imported}, aggiornate {updated}, saltate {skipped}."
-    })
-
-@app.post("/api/users/import-csv")
-@admin_required
-def import_users_csv():
-    if "file" not in request.files:
-        return jsonify({"ok": False, "error": "File CSV mancante"}), 400
-
-    uploaded_file = request.files["file"]
-
-    try:
-        raw = uploaded_file.read()
-        if len(raw) > 256 * 1024:
-            return jsonify({"ok": False, "error": "File troppo grande. Limite massimo: 256 KB"}), 400
-        content = raw.decode("utf-8-sig", errors="ignore")
-    except Exception:
-        return jsonify({"ok": False, "error": "Impossibile leggere il file CSV"}), 400
-
-    if not content.strip():
-        return jsonify({"ok": False, "error": "CSV vuoto"}), 400
-
-    reader = csv.reader(io.StringIO(content), delimiter=";")
-    rows = []
-    for row in reader:
-        cleaned = [cell.strip() for cell in row]
-        if any(cleaned):
-            rows.append(cleaned)
-
-    if not rows:
-        return jsonify({"ok": False, "error": "CSV vuoto"}), 400
-
-    first = ";".join(rows[0]).lower().replace(" ", "")
-    if first.startswith("nome;") or "telefono" in first or "codice" in first:
-        rows = rows[1:]
-
-    # Batch piccolo per evitare timeout Gunicorn su Render free.
-    if len(rows) > 100:
-        return jsonify({
-            "ok": False,
-            "error": "Troppe righe. Import massimo consentito: 100 utenti per volta. Dividi il CSV in piu' file."
-        }), 400
-
-    now = datetime.now().isoformat(timespec="seconds")
-    imported = 0
-    updated = 0
-    skipped = 0
-    errors = []
-
-    conn = db()
-    cur = conn.cursor()
-
-    try:
-        existing_rows = cur.execute("SELECT phone FROM users").fetchall()
-        existing_phones = {r["phone"] for r in existing_rows}
-
-        # Cache hashing: se piu' utenti hanno stesso PIN, l'hash si calcola una sola volta.
-        pin_hash_cache = {}
-
-        for idx, row in enumerate(rows, start=1):
-            if len(row) < 3:
-                skipped += 1
-                errors.append(f"Riga {idx}: campi insufficienti")
-                continue
-
-            name = row[0].strip()
-            phone = row[1].strip()
-            section = row[2].strip() or None
-            role = row[3].strip() if len(row) > 3 and row[3].strip() else "rappresentante"
-            pin = row[4].strip() if len(row) > 4 and row[4].strip() else "1234"
-
-            if role not in ["admin", "rappresentante"]:
-                role = "rappresentante"
-
-            if not name or not phone:
-                skipped += 1
-                errors.append(f"Riga {idx}: nome o telefono/codice mancante")
-                continue
-
-            if pin not in pin_hash_cache:
-                pin_hash_cache[pin] = fast_pin_hash(pin)
-
-            pin_hash = pin_hash_cache[pin]
-
-            if phone in existing_phones:
-                cur.execute(
-                    "UPDATE users SET name=?, section=?, role=?, pin_hash=?, active=1 WHERE phone=?",
-                    (name, section, role, pin_hash, phone)
-                )
-                updated += 1
-            else:
-                cur.execute(
-                    "INSERT INTO users(name, phone, section, role, pin_hash, qr_token, active, created_at) VALUES(?,?,?,?,?,?,1,?)",
-                    (name, phone, section, role, pin_hash, secrets.token_urlsafe(12), now)
-                )
-                existing_phones.add(phone)
-                imported += 1
-
-        conn.commit()
-
-    except Exception as exc:
-        conn.rollback()
-        conn.close()
-        return jsonify({"ok": False, "error": f"Errore import CSV: {str(exc)}"}), 500
-
-    conn.close()
-
-    return jsonify({
-        "ok": True,
-        "imported": imported,
-        "updated": updated,
-        "skipped": skipped,
-        "errors": errors[:10],
-        "message": f"Import completato. Importati {imported}, aggiornati {updated}, saltati {skipped}."
-    })
-
-
-@app.patch("/api/users/<int:user_id>")
-@admin_required
-def update_user(user_id):
-    data = request.get_json(force=True)
-
-    name = str(data.get("name", "")).strip()
-    phone = str(data.get("phone", "")).strip()
-    section = str(data.get("section", "")).strip() or None
-    role = str(data.get("role", "rappresentante")).strip()
-    pin = str(data.get("pin", "")).strip()
-    allowed_lists = "|".join(data.get("allowed_lists", []) if isinstance(data.get("allowed_lists", []), list) else [x.strip() for x in str(data.get("allowed_lists", "")).split("|") if x.strip()])
-
-    if not name or not phone:
-        return jsonify({"ok": False, "error": "Nome e telefono/codice sono obbligatori"}), 400
-
-    if role not in ["admin", "rappresentante"]:
-        return jsonify({"ok": False, "error": "Ruolo non valido"}), 400
-
-    conn = db()
-    try:
-        if pin:
-            conn.execute(
-                "UPDATE users SET name=?, phone=?, section=?, role=?, allowed_lists=?, pin_hash=? WHERE id=?",
-                (name, phone, section, role, allowed_lists, generate_password_hash(pin), user_id)
-            )
-        else:
-            conn.execute(
-                "UPDATE users SET name=?, phone=?, section=?, role=?, allowed_lists=? WHERE id=?",
-                (name, phone, section, role, allowed_lists, user_id)
-            )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
-        return jsonify({"ok": False, "error": "Telefono/codice gia' esistente"}), 409
-
-    conn.close()
-    return jsonify({"ok": True, "message": "Utente aggiornato correttamente"})
-
-@app.delete("/api/users/<int:user_id>")
-@admin_required
-def delete_user(user_id):
-    user = current_user()
-    if user["id"] == user_id:
-        return jsonify({"ok": False, "error": "Non puoi rimuovere l'utente attualmente collegato"}), 400
-    conn = db()
-    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True})
-
-@app.patch("/api/users/<int:user_id>/toggle")
-@admin_required
-def toggle_user(user_id):
-    user = current_user()
-    if user["id"] == user_id:
-        return jsonify({"ok": False, "error": "Non puoi disattivare l'utente attualmente collegato"}), 400
-    conn = db()
-    row = conn.execute("SELECT active FROM users WHERE id=?", (user_id,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({"ok": False, "error": "Utente non trovato"}), 404
-    new_active = 0 if row["active"] else 1
-    conn.execute("UPDATE users SET active=? WHERE id=?", (new_active, user_id))
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "active": new_active})
-
-
-@app.get("/api/section-details")
-@admin_required
-def section_details():
-    conn = db()
-    rows = conn.execute("""
-        SELECT r.section, v.vote_type, v.list_name, v.name, v.votes
-        FROM reports r
-        JOIN votes v ON v.report_id = r.id
-        ORDER BY CAST(r.section AS INTEGER), r.section, v.vote_type, v.list_name, v.name
-    """).fetchall()
-    conn.close()
-
-    result = {}
-    for row in rows:
-        section = row["section"]
-        if section not in result:
-            result[section] = {
-                "lists": {},
-                "mayors": {},
-                "preferences": {}
-            }
-
-        vote_type = row["vote_type"]
-        if vote_type == "lista":
-            result[section]["lists"][row["name"]] = row["votes"]
-        elif vote_type == "sindaco":
-            result[section]["mayors"][row["name"]] = row["votes"]
-        elif vote_type == "preferenza":
-            list_name = row["list_name"] or ""
-            result[section]["preferences"].setdefault(list_name, {})
-            result[section]["preferences"][list_name][row["name"]] = row["votes"]
-
-    return jsonify({"ok": True, "sections": result, "data": ELECTION_DATA})
-
-@app.get("/api/export.csv")
-@admin_required
-def export_csv():
-    conn = db()
-
-    # Migrazione di sicurezza nel caso il database SQLite esistente sia stato creato con una versione precedente.
-    cur = conn.cursor()
-    report_cols = [row["name"] for row in cur.execute("PRAGMA table_info(reports)").fetchall()]
-    migrations = {
-        "voters": "ALTER TABLE reports ADD COLUMN voters INTEGER NOT NULL DEFAULT 0",
-        "blank_ballots": "ALTER TABLE reports ADD COLUMN blank_ballots INTEGER NOT NULL DEFAULT 0",
-        "null_ballots": "ALTER TABLE reports ADD COLUMN null_ballots INTEGER NOT NULL DEFAULT 0",
-        "contested_ballots": "ALTER TABLE reports ADD COLUMN contested_ballots INTEGER NOT NULL DEFAULT 0",
-        "closed": "ALTER TABLE reports ADD COLUMN closed INTEGER NOT NULL DEFAULT 0",
-        "closed_at": "ALTER TABLE reports ADD COLUMN closed_at TEXT"
-    }
-    for col, sql in migrations.items():
-        if col not in report_cols:
-            cur.execute(sql)
-    conn.commit()
-
-    rows = conn.execute("""
-        SELECT
-            r.section AS section,
-            u.name AS representative,
-            COALESCE(r.voters, 0) AS voters,
-            COALESCE(r.blank_ballots, 0) AS blank_ballots,
-            COALESCE(r.null_ballots, 0) AS null_ballots,
-            COALESCE(r.contested_ballots, 0) AS contested_ballots,
-            COALESCE(r.updated_at, '') AS updated_at,
-            v.vote_type AS vote_type,
-            COALESCE(v.list_name, '') AS list_name,
-            v.name AS name,
-            COALESCE(v.votes, 0) AS votes
-        FROM reports r
-        JOIN users u ON u.id = r.user_id
-        JOIN votes v ON v.report_id = r.id
-        ORDER BY r.section, v.vote_type, v.list_name, v.name
-    """).fetchall()
-    conn.close()
-
-    output = io.StringIO()
-    output.write("sep=;\n")
-
-    writer = csv.writer(
-        output,
-        delimiter=";",
-        quotechar='"',
-        quoting=csv.QUOTE_MINIMAL,
-        lineterminator="\n",
-    )
-
-    writer.writerow([
-        "Sezione",
-        "Rappresentante",
-        "Votanti",
-        "Bianche",
-        "Nulle",
-        "Elettori",
-        "Aggiornato",
-        "Tipo",
-        "Lista",
-        "Nome",
-        "Voti",
-    ])
-
-    for row in rows:
-        writer.writerow([
-            row["section"],
-            row["representative"],
-            row["voters"],
-            row["blank_ballots"],
-            row["null_ballots"],
-            row["contested_ballots"],
-            row["updated_at"],
-            row["vote_type"],
-            row["list_name"],
-            row["name"],
-            row["votes"],
-        ])
-
-    csv_content = "\ufeff" + output.getvalue()
-
-    return Response(
-        csv_content,
-        mimetype="text/csv; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=report_comunali_barcellona.csv"},
-    )
-
-
-@app.get("/api/modules")
-@admin_required
-def get_modules_api():
-    user = current_user()
-    conn = db()
-    if str(user["role"]).lower() == "superadmin":
-        cfg = get_module_config(conn)
-        scope = "global"
-    else:
-        cfg = get_admin_module_permissions(conn, user["id"])
-        scope = "admin"
-    conn.close()
-    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": cfg.get(k, False)} for k in MODULE_CATALOG]
-    return jsonify({"ok": True, "modules": modules, "config": cfg, "scope": scope})
-
-@app.post("/api/modules")
-@super_required
-def save_modules_api():
-    # Solo il Super Utente modifica il catalogo globale dei moduli vendibili.
-    data = request.get_json(force=True).get("modules", {})
-    conn = db()
-    cfg = save_module_config(conn, data)
-    conn.commit(); conn.close()
-    return jsonify({"ok": True, "config": cfg, "message": "Moduli aggiornati"})
-
-@app.get("/api/admin/available-modules")
-@admin_required
-def admin_available_modules_api():
-    user = current_user()
-    conn = db()
-    if str(user["role"]).lower() == "superadmin":
-        cfg = get_module_config(conn)
-    else:
-        cfg = get_admin_module_permissions(conn, user["id"])
-    conn.close()
-    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": bool(cfg.get(k, False))} for k in MODULE_CATALOG if cfg.get(k, False)]
-    return jsonify({"ok": True, "modules": modules})
-
-@app.get("/api/admin/payment-info")
-@admin_required
-def admin_payment_info_api():
-    # Informazioni di pagamento mostrate all'Admin cliente.
-    # Non avvia pagamenti reali: espone provider configurati e istruzioni.
-    user = current_user()
-    conn = db()
-    profile = conn.execute("SELECT * FROM admin_profiles WHERE user_id=?", (user["id"],)).fetchone() if str(user["role"]).lower() == "admin" else None
-    payments = conn.execute("SELECT provider, enabled, mode, public_key, webhook_url, notes FROM payment_methods WHERE enabled=1 ORDER BY provider").fetchall()
-    conn.close()
-    instructions = [
-        "Scegliere uno dei metodi abilitati dal Super Utente.",
-        "Per carte/checkout usare il link o public key configurata dal provider.",
-        "Per bonifico o PagoPA seguire le note operative indicate dal Super Utente.",
-        "Dopo il pagamento l'attivazione commerciale dei moduli resta gestita dal Super Utente."
-    ]
-    return jsonify({"ok": True, "profile": dict(profile) if profile else {}, "payments": [dict(p) for p in payments], "instructions": instructions})
-
-def _rows_for_audit(conn):
-    return conn.execute("""
-        SELECT r.id, r.section, r.voters, r.blank_ballots, r.null_ballots, r.contested_ballots,
-               r.split_votes_json, r.closed, r.updated_at, u.name AS user_name
-        FROM reports r LEFT JOIN users u ON u.id=r.user_id
-        ORDER BY CAST(r.section AS INTEGER), r.section
-    """).fetchall()
-
-@app.get("/api/blockchain")
-@admin_required
-def blockchain_api():
-    if not current_user_module_enabled("blockchain"):
-        return jsonify({"ok": False, "error": "Modulo blockchain non attivo"}), 403
-    conn = db()
-    rows = _rows_for_audit(conn)
-    chain = []
-    previous = "GENESIS"
-    for index, r in enumerate(rows, start=1):
-        payload = {k: r[k] for k in r.keys()}
-        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        data_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        block_hash = hashlib.sha256((previous + data_hash + str(index)).encode("utf-8")).hexdigest()
-        chain.append({"index": index, "section": r["section"], "updated_at": r["updated_at"], "representative": r["user_name"], "data_hash": data_hash, "previous_hash": previous, "block_hash": block_hash, "status": "verificato"})
-        previous = block_hash
-    modules = get_module_config(conn)
-    conn.close()
-    nft_badges = [
-        {"name": "Sezione certificata", "trigger": "Verbale chiuso e hashato", "utility": "Badge pubblico di trasparenza"},
-        {"name": "Sentinella civica", "trigger": "Controllo OSINT o audit completato", "utility": "Reputazione volontari"},
-        {"name": "Milestone elettorale", "trigger": "100% sezioni acquisite", "utility": "Archivio storico condivisibile"},
-        {"name": "Partecipazione DAO", "trigger": "Proposta o voto civico", "utility": "Accesso a consultazioni interne"}
-    ]
-    dao = {"proposal_types": ["Bilancio partecipativo", "Priorità di quartiere", "Monitoraggio programma", "Consultazioni interne"], "roles": ["cittadino verificato", "osservatore", "moderatore", "admin"], "governance": "Token non speculativo/reputazionale, voto ponderabile per presenza civica e verifica identità.", "enabled": modules.get("blockchain", False)}
-    return jsonify({"ok": True, "chain": chain, "last_hash": previous, "nft_badges": nft_badges, "dao": dao})
-
-@app.get("/api/osint")
-@admin_required
-def osint_api():
-    if not current_user_module_enabled("osint"):
-        return jsonify({"ok": False, "error": "Modulo OSINT non attivo"}), 403
-    conn = db()
-    payload = _intelligence_payload(conn)
-    conn.close()
-    alerts = []
-    for a in payload["body_graph"]["alerts"][:40]:
-        alerts.append({"type": "concentrazione territoriale", "subject": a["candidate"], "area": "Sezione " + str(a["section"]), "risk": a["level"], "evidence": f"{a['votes']} preferenze, {a['section_pref_share_pct']}% nella sezione"})
-    for h in payload["heatmap"]:
-        if h.get("split_rate_pct", 0) >= 15:
-            alerts.append({"type": "voto disgiunto elevato", "subject": h.get("top_mayor") or "n/d", "area": "Sezione " + str(h["section"]), "risk": "attenzione", "evidence": f"{h['split_vote_count']} disgiunti, {h['split_rate_pct']}%"})
-    sources = [
-        {"name": "Albo pretorio e delibere", "use": "Verifica atti, incarichi, finanziamenti e reti amministrative"},
-        {"name": "Social network pubblici", "use": "Mappatura engagement, temi ricorrenti e sentiment"},
-        {"name": "Open data elettorali", "use": "Storico sezioni, turnout, swing e confronto territoriale"},
-        {"name": "Rassegna stampa locale", "use": "Eventi critici, endorsement, controversie e reputazione"}
-    ]
-    return jsonify({"ok": True, "alerts": alerts[:80], "sources": sources, "summary": payload["summary"], "disclaimer": "Usare solo fonti aperte, dati leciti e valutazioni verificabili. Non sostituisce indagini ufficiali."})
-
-@app.post("/api/simulator")
-@admin_required
-def simulator_api():
-    if not current_user_module_enabled("simulator"):
-        return jsonify({"ok": False, "error": "Modulo simulatore non attivo"}), 403
-    data = request.get_json(force=True)
-    turnout_delta = float(data.get("turnout_delta", 0) or 0)
-    mayor_swing = float(data.get("mayor_swing", 0) or 0)
-    list_swing = float(data.get("list_swing", 0) or 0)
-    target_mayor = str(data.get("target_mayor", "") or "")
-    target_list = str(data.get("target_list", "") or "")
-    conn = db()
-    base = _intelligence_payload(conn)
-    seats = compute_seats(conn)
-    conn.close()
-    factor = max(0.1, 1 + turnout_delta / 100.0)
-    mayors = []
-    for m in base["prediction"]["mayors"]:
-        projected = float(m["projected"]) * factor
-        if target_mayor and m["name"] == target_mayor:
-            projected *= (1 + mayor_swing / 100.0)
-        mayors.append({**m, "simulated": round(projected)})
-    lists = []
-    for l in base["prediction"]["lists"]:
-        projected = float(l["projected"]) * factor
-        if target_list and l["name"] == target_list:
-            projected *= (1 + list_swing / 100.0)
-        lists.append({**l, "simulated": round(projected)})
-    mayors.sort(key=lambda x: -x["simulated"]); lists.sort(key=lambda x: -x["simulated"])
-    return jsonify({"ok": True, "scenario": {"turnout_delta": turnout_delta, "mayor_swing": mayor_swing, "list_swing": list_swing, "target_mayor": target_mayor, "target_list": target_list}, "mayors": mayors, "lists": lists, "base_seats": seats, "note": "Simulazione esplorativa calcolata sui dati caricati e sulle proiezioni correnti."})
-
-
-# =========================
-# v73 - SUPER UTENTE
-# =========================
+@module_required("intelligence")
+def ai_predictive():
+    tid=tenant_query_id(); conn=db(); p=ai_payload(conn,tid); conn.close(); return jsonify({"ok":True,"tenant_id":tid,"prediction":p["prediction"],"machine_learning":p["machine_learning"]})
+
+# SuperAdmin SaaS
 @app.get("/api/super/overview")
 @super_required
 def super_overview():
-    conn = db()
-    users_rows = conn.execute("SELECT id, name, phone, role, section, active, created_at FROM users ORDER BY role, name").fetchall()
-    profiles_rows = conn.execute("SELECT * FROM admin_profiles").fetchall()
-    payments_rows = conn.execute("SELECT * FROM payment_methods ORDER BY provider").fetchall()
-    global_cfg = get_module_config(conn)
-    modules = [{**MODULE_CATALOG[k], "key": k, "enabled": global_cfg.get(k, False)} for k in MODULE_CATALOG]
-    permissions = {}
-    for u in users_rows:
-        if str(u["role"]).lower() == "admin":
-            permissions[str(u["id"])] = get_admin_module_permissions(conn, u["id"])
-    conn.close()
-    profiles = {str(r["user_id"]): dict(r) for r in profiles_rows}
-    return jsonify({"ok": True, "users": [dict(r) for r in users_rows], "profiles": profiles, "payments": [dict(r) for r in payments_rows], "modules": modules, "permissions": permissions})
+    conn=db(); tenants=[dict(r) for r in conn.execute("SELECT * FROM tenants ORDER BY id").fetchall()]; users=[dict(r) for r in conn.execute("SELECT id,tenant_id,name,phone,role,section,active FROM users ORDER BY tenant_id,id").fetchall()]; payments=[dict(r) for r in conn.execute("SELECT * FROM payment_methods ORDER BY id DESC").fetchall()]
+    profiles={str(r["user_id"]):dict(r) for r in conn.execute("SELECT * FROM admin_profiles").fetchall()}
+    permissions={}
+    for u in users:
+        if u["role"]=="admin":
+            fake=conn.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone(); permissions[str(u["id"])] = get_user_modules(conn,fake)
+    modules=[]
+    for k,v in MODULE_CATALOG.items(): modules.append({"key":k,**v,"enabled":True})
+    conn.close(); return jsonify({"ok":True,"tenants":tenants,"modules":modules,"users":users,"profiles":profiles,"payments":payments,"permissions":permissions})
+
+@app.post("/api/super/tenants")
+@super_required
+def create_tenant():
+    data=request.get_json(force=True); name=str(data.get("name") or data.get("organization") or "Nuova organizzazione").strip(); slug=slugify(data.get("slug") or name); exp=data.get("expires_at") or (datetime.now()+timedelta(days=90)).date().isoformat()
+    conn=db(); conn.execute("INSERT INTO tenants(name,slug,organization_type,place,cap,province,region,plan,status,expires_at,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(name,slug,data.get("organization_type","organizzazione politica"),data.get("place"),data.get("cap"),data.get("province"),data.get("region"),data.get("plan","trial"),data.get("status","active"),exp,data.get("notes"),now(),now()))
+    tid=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    for k,en in DEFAULT_MODULES.items(): conn.execute("INSERT INTO tenant_modules(tenant_id,module_key,enabled,updated_at) VALUES(?,?,?,?)",(tid,k,int(en),now()))
+    for k,v in {"total_electors":"0","total_voters":"0","council_seats":"24","winner_mayor":"","mode":"first","election_data_json":json.dumps(DEFAULT_ELECTION_DATA,ensure_ascii=False)}.items(): conn.execute("INSERT INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)",(tid,k,v))
+    audit(conn,tid,current_user()["id"],"create_tenant","tenants",data); conn.commit(); conn.close(); return jsonify({"ok":True,"tenant_id":tid,"slug":slug})
 
 @app.post("/api/super/admins")
 @super_required
-def super_create_admin():
-    # Il super utente crea esclusivamente account Admin/clienti.
-    # Rilevatori e rappresentanti restano gestiti dall'admin nel pannello utenti.
-    data = request.get_json(force=True)
-    name = str(data.get("name", "")).strip()
-    phone = str(data.get("phone", "")).strip()
-    pin = str(data.get("pin", "")).strip()
-    if not name or not phone or not pin:
-        return jsonify({"ok": False, "error": "Nome, telefono/codice e PIN sono obbligatori"}), 400
-    now = datetime.now().isoformat(timespec="seconds")
-    conn = db()
-    try:
-        cur = conn.execute("INSERT INTO users(name, phone, pin_hash, qr_token, role, section, allowed_lists, active, created_at) VALUES(?,?,?,?,?,?,?,1,?)",
-            (name, phone, generate_password_hash(pin), secrets.token_urlsafe(24), "admin", None, "", now))
-        user_id = cur.lastrowid
-        conn.execute("INSERT OR REPLACE INTO admin_profiles(user_id, organization, place, cap, province, region, usage_reason, beneficiaries, notes, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (user_id, str(data.get("organization", "")).strip(), str(data.get("place", "")).strip(), str(data.get("cap", "")).strip(), str(data.get("province", "")).strip(), str(data.get("region", "")).strip(), str(data.get("usage_reason", "")).strip(), str(data.get("beneficiaries", "")).strip(), str(data.get("notes", "")).strip(), now))
-        # Se la schermata Super Utente invia già i moduli scelti, li associa subito.
-        # In caso contrario l'admin nasce con tutti i moduli globali attivi,
-        # modificabili successivamente dalla tabella Admin registrati.
-        modules_payload = data.get("modules")
-        if isinstance(modules_payload, dict):
-            save_admin_module_permissions(conn, user_id, modules_payload)
-        else:
-            save_admin_module_permissions(conn, user_id, get_module_config(conn))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close(); return jsonify({"ok": False, "error": "Telefono/codice già esistente"}), 409
-    conn.close()
-    return jsonify({"ok": True, "message": "Admin creato e profilato", "user_id": user_id})
-
-@app.patch("/api/super/admins/<int:user_id>/profile")
-@super_required
-def super_update_admin_profile(user_id):
-    data = request.get_json(force=True)
-    conn = db()
-    row = conn.execute("SELECT id, role FROM users WHERE id=?", (user_id,)).fetchone()
-    if not row or str(row["role"]).lower() != "admin":
-        conn.close(); return jsonify({"ok": False, "error": "È possibile profilare solo utenti admin"}), 400
-    now = datetime.now().isoformat(timespec="seconds")
-    conn.execute("INSERT OR REPLACE INTO admin_profiles(user_id, organization, place, cap, province, region, usage_reason, beneficiaries, notes, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (user_id, str(data.get("organization", "")).strip(), str(data.get("place", "")).strip(), str(data.get("cap", "")).strip(), str(data.get("province", "")).strip(), str(data.get("region", "")).strip(), str(data.get("usage_reason", "")).strip(), str(data.get("beneficiaries", "")).strip(), str(data.get("notes", "")).strip(), now))
-    conn.commit(); conn.close()
-    return jsonify({"ok": True, "message": "Profilo admin aggiornato"})
+def create_admin_super():
+    data=request.get_json(force=True); tenant_id=data.get("tenant_id")
+    if not tenant_id:
+        # crea tenant automaticamente dai dati commerciali, stile Focus360AI
+        res_data={"name":data.get("organization") or data.get("name") or "Organizzazione politica", "place":data.get("place"),"cap":data.get("cap"),"province":data.get("province"),"region":data.get("region"),"plan":data.get("plan","trial")}
+        conn=db(); slug=slugify(res_data["name"]); conn.execute("INSERT INTO tenants(name,slug,place,cap,province,region,plan,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(res_data["name"],slug,res_data.get("place"),res_data.get("cap"),res_data.get("province"),res_data.get("region"),res_data.get("plan"),"active",(datetime.now()+timedelta(days=90)).date().isoformat(),now(),now())); tenant_id=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        for k,en in DEFAULT_MODULES.items(): conn.execute("INSERT INTO tenant_modules(tenant_id,module_key,enabled,updated_at) VALUES(?,?,?,?)",(tenant_id,k,int(en),now()))
+        for k,v in {"total_electors":"0","total_voters":"0","council_seats":"24","winner_mayor":"","mode":"first","election_data_json":json.dumps(DEFAULT_ELECTION_DATA,ensure_ascii=False)}.items(): conn.execute("INSERT INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)",(tenant_id,k,v))
+    else: conn=db()
+    name=str(data.get("name","")).strip(); phone=str(data.get("phone","")).strip(); pin=str(data.get("pin","")).strip()
+    if not name or not phone or not pin: conn.close(); return jsonify({"ok":False,"error":"Nome, codice e PIN obbligatori"}),400
+    conn.execute("INSERT INTO users(tenant_id,name,phone,pin_hash,qr_token,role,section,allowed_lists,active,created_at) VALUES(?,?,?,?,?,?,?, ?,1,?)",(tenant_id,name,phone,generate_password_hash(pin),secrets.token_urlsafe(24),"admin",None,"",now()))
+    uid=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.execute("INSERT OR REPLACE INTO admin_profiles(user_id,organization,place,cap,province,region,usage_reason,beneficiaries,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(uid,data.get("organization"),data.get("place"),data.get("cap"),data.get("province"),data.get("region"),data.get("usage_reason"),data.get("beneficiaries"),data.get("notes"),now()))
+    mods=data.get("modules") or DEFAULT_MODULES
+    for k in MODULE_CATALOG: conn.execute("INSERT OR REPLACE INTO admin_module_permissions(user_id,module_key,enabled,updated_at) VALUES(?,?,?,?)",(uid,k,int(bool(mods.get(k,False))),now()))
+    audit(conn,tenant_id,current_user()["id"],"create_admin","users",data); conn.commit(); conn.close(); return jsonify({"ok":True,"user_id":uid,"tenant_id":tenant_id})
 
 @app.post("/api/super/admins/<int:user_id>/modules")
 @super_required
-def super_update_admin_modules(user_id):
-    # Associazione moduli al singolo Admin cliente.
-    # I pulsanti non assegnati non compariranno nel suo pannello.
-    data = request.get_json(force=True)
-    modules = data.get("modules", {})
-    conn = db()
-    row = conn.execute("SELECT id, role FROM users WHERE id=?", (user_id,)).fetchone()
-    if not row or str(row["role"]).lower() != "admin":
-        conn.close(); return jsonify({"ok": False, "error": "È possibile assegnare moduli solo a utenti admin"}), 400
-    clean = save_admin_module_permissions(conn, user_id, modules)
-    conn.commit(); conn.close()
-    return jsonify({"ok": True, "permissions": clean, "message": "Moduli assegnati all'admin"})
-
+def admin_modules_super(user_id:int):
+    mods=request.get_json(force=True).get("modules",{}); conn=db()
+    for k in MODULE_CATALOG: conn.execute("INSERT OR REPLACE INTO admin_module_permissions(user_id,module_key,enabled,updated_at) VALUES(?,?,?,?)",(user_id,k,int(bool(mods.get(k,False))),now()))
+    conn.commit(); conn.close(); return jsonify({"ok":True})
+@app.post("/api/modules")
+@super_required
+def global_modules_compat(): return jsonify({"ok":True,"message":"In modalità multitenant i moduli si gestiscono per tenant/admin"})
 @app.post("/api/super/payments")
 @super_required
-def super_save_payment_method():
-    data = request.get_json(force=True)
-    provider = str(data.get("provider", "")).strip()
-    if provider not in ["Stripe", "PayPal", "Nexi", "Satispay", "PagoPA", "Bonifico", "Altro"]:
-        return jsonify({"ok": False, "error": "Provider non valido"}), 400
-    now = datetime.now().isoformat(timespec="seconds")
-    conn = db()
-    existing = conn.execute("SELECT id FROM payment_methods WHERE provider=?", (provider,)).fetchone()
-    payload = (int(bool(data.get("enabled", False))), str(data.get("mode", "test")).strip() or "test", str(data.get("public_key", "")).strip(), str(data.get("webhook_url", "")).strip(), str(data.get("notes", "")).strip(), now)
-    if existing:
-        conn.execute("UPDATE payment_methods SET enabled=?, mode=?, public_key=?, webhook_url=?, notes=?, updated_at=? WHERE provider=?", (*payload, provider))
-    else:
-        conn.execute("INSERT INTO payment_methods(provider, enabled, mode, public_key, webhook_url, notes, updated_at) VALUES(?,?,?,?,?,?,?)", (provider, *payload))
-    conn.commit(); conn.close()
-    return jsonify({"ok": True, "message": "Metodo di pagamento aggiornato"})
-
+def payments():
+    d=request.get_json(force=True); conn=db(); conn.execute("INSERT INTO payment_methods(provider,enabled,mode,public_key,webhook_url,notes,updated_at) VALUES(?,?,?,?,?,?,?)",(d.get("provider"),int(bool(d.get("enabled"))),d.get("mode","test"),d.get("public_key"),d.get("webhook_url"),d.get("notes"),now())); conn.commit(); conn.close(); return jsonify({"ok":True})
 @app.get("/api/super/payment-providers")
 @super_required
-def super_payment_providers():
-    # Schede tecniche per collegare in produzione le API principali.
-    providers = [
-        {"provider": "Stripe", "api": "Checkout Sessions / Payment Links", "env": ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"], "use": "Carte, wallet, abbonamenti SaaS"},
-        {"provider": "PayPal", "api": "Orders API / Subscriptions API", "env": ["PAYPAL_CLIENT_ID", "PAYPAL_SECRET"], "use": "Pagamenti account PayPal e carte"},
-        {"provider": "Nexi", "api": "XPay / Hosted Payment Page", "env": ["NEXI_ALIAS", "NEXI_SECRET_KEY"], "use": "Circuiti bancari italiani"},
-        {"provider": "Satispay", "api": "Online Payments API", "env": ["SATISPAY_KEY_ID", "SATISPAY_PRIVATE_KEY"], "use": "Pagamenti mobile"},
-        {"provider": "PagoPA", "api": "Partner/PSP integration", "env": ["PAGOPA_SUBSCRIPTION_KEY"], "use": "Scenari PA/enti aderenti"}
-    ]
-    return jsonify({"ok": True, "providers": providers})
+def providers():
+    return jsonify({"ok":True,"providers":[{"provider":"Stripe","api":"Checkout + Webhook","env":["STRIPE_PUBLIC_KEY","STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET"],"use":"abbonamenti mensili/annuali"},{"provider":"PayPal","api":"Orders/Subscriptions","env":["PAYPAL_CLIENT_ID","PAYPAL_SECRET"],"use":"pagamento piano o moduli"},{"provider":"PagoPA","api":"integrazione PSP","env":["PAGOPA_API_KEY"],"use":"enti/associazioni strutturate"}]})
+
+@app.post("/api/super/api-keys")
+@super_required
+def create_api_key():
+    d=request.get_json(force=True); tid=int(d.get("tenant_id")); raw="fp_"+secrets.token_urlsafe(32); prefix=raw[:10]
+    conn=db(); conn.execute("INSERT INTO api_keys(tenant_id,name,key_hash,prefix,scopes,active,created_at) VALUES(?,?,?,?,?,?,?)",(tid,d.get("name","API Key"),hash_api_key(raw),prefix,d.get("scopes","read"),1,now())); conn.commit(); conn.close(); return jsonify({"ok":True,"api_key":raw,"prefix":prefix,"warning":"Salvare ora la chiave: non sarà più mostrata."})
+
+# Public API v1
+@app.get("/api/v1/tenant")
+@api_auth("read")
+def api_tenant():
+    conn=db(); t=dict(conn.execute("SELECT * FROM tenants WHERE id=?",(request.tenant_id,)).fetchone()); conn.close(); return jsonify({"ok":True,"tenant":t})
+@app.get("/api/v1/results")
+@api_auth("read")
+def api_results():
+    conn=db(); p=ai_payload(conn,request.tenant_id); conn.close(); return jsonify({"ok":True,"tenant_id":request.tenant_id,"summary":p["summary"],"prediction":p["prediction"],"heatmap":p["heatmap"]})
+@app.get("/api/v1/ai/predictions")
+@api_auth("read")
+def api_ai():
+    conn=db(); p=ai_payload(conn,request.tenant_id); conn.close(); return jsonify({"ok":True,"prediction":p["prediction"],"machine_learning":p["machine_learning"],"political_weight":p["political_weight"][:100]})
+@app.post("/api/v1/reports")
+@api_auth("write")
+def api_write_report():
+    ok,p,code=_save_report_payload(request.tenant_id, None, request.get_json(force=True), False); return jsonify(p),code
+
+# Compat modules APIs
+@app.get("/api/blockchain")
+@admin_required
+@module_required("blockchain")
+def blockchain_api():
+    tid=tenant_query_id(); conn=db(); rows=conn.execute("SELECT * FROM audit_log WHERE tenant_id=? ORDER BY id DESC LIMIT 100",(tid,)).fetchall(); chain=[]; prev="0"
+    for r in reversed(rows):
+        block_hash=hashlib.sha256(f"{prev}|{r['id']}|{r['payload_hash']}|{r['created_at']}".encode()).hexdigest(); chain.append({"id":r["id"],"action":r["action"],"resource":r["resource"],"created_at":r["created_at"],"prev_hash":prev,"hash":block_hash}); prev=block_hash
+    conn.close(); return jsonify({"ok":True,"tenant_id":tid,"chain":chain,"note":"Hash chain tenant-aware per audit interno"})
+@app.get("/api/osint")
+@admin_required
+@module_required("osint")
+def osint_api(): return jsonify({"ok":True,"signals":[],"message":"Modulo predisposto: inserire fonti OSINT pubbliche e policy privacy prima del crawling automatico."})
+@app.get("/api/simulator")
+@admin_required
+@module_required("simulator")
+def simulator_api():
+    tid=tenant_query_id(); swing=float(request.args.get("swing",0) or 0); conn=db(); p=ai_payload(conn,tid); conn.close(); lists=[]
+    for x in p["prediction"]["lists"]: lists.append({**x,"scenario_projected":round(x["projected"]*(1+swing/100))})
+    return jsonify({"ok":True,"swing_pct":swing,"lists":lists})
 
 if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    init_db(); app.run(debug=True)
