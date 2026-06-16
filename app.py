@@ -806,7 +806,19 @@ def payments():
 @app.get("/api/super/payment-providers")
 @super_required
 def providers():
-    return jsonify({"ok":True,"providers":[{"provider":"Stripe","api":"Checkout + Webhook","env":["STRIPE_PUBLIC_KEY","STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET"],"use":"abbonamenti mensili/annuali"},{"provider":"PayPal","api":"Orders/Subscriptions","env":["PAYPAL_CLIENT_ID","PAYPAL_SECRET"],"use":"pagamento piano o moduli"},{"provider":"PagoPA","api":"integrazione PSP","env":["PAGOPA_API_KEY"],"use":"enti/associazioni strutturate"}]})
+    return jsonify({"ok":True,"providers":[
+        {"provider":"Carta di Credito","api":"Stripe Checkout / Nexi XPay / PayPal Advanced Card Payments","env":["CARD_PROVIDER","CARD_PUBLIC_KEY","CARD_SECRET_KEY","CARD_WEBHOOK_SECRET"],"use":"pagamento immediato piani START, PRO ed ENTERPRISE con ricevuta e rinnovo"},
+        {"provider":"Stripe","api":"Checkout + Billing + Webhook","env":["STRIPE_PUBLIC_KEY","STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET","STRIPE_PRICE_START","STRIPE_PRICE_PRO","STRIPE_PRICE_ENTERPRISE"],"use":"abbonamenti mensili/annuali, carta, Apple Pay e Google Pay"},
+        {"provider":"PayPal","api":"Orders/Subscriptions","env":["PAYPAL_CLIENT_ID","PAYPAL_SECRET","PAYPAL_WEBHOOK_ID"],"use":"pagamento piano, rinnovi e moduli aggiuntivi"},
+        {"provider":"Nexi","api":"XPay / Easy Checkout","env":["NEXI_ALIAS","NEXI_SECRET_KEY","NEXI_WEBHOOK_SECRET"],"use":"carte di credito/debito, soluzione italiana per clienti business"},
+        {"provider":"Satispay","api":"Payment API","env":["SATISPAY_KEY_ID","SATISPAY_PRIVATE_KEY","SATISPAY_WEBHOOK_SECRET"],"use":"pagamenti rapidi per comitati e piccole organizzazioni"},
+        {"provider":"PagoPA","api":"integrazione PSP","env":["PAGOPA_API_KEY","PAGOPA_STATION_ID"],"use":"enti, fondazioni, associazioni strutturate e pagamenti tracciabili"},
+        {"provider":"Apple Pay","api":"tramite Stripe/Nexi","env":["APPLE_PAY_MERCHANT_ID"],"use":"checkout veloce da dispositivi Apple"},
+        {"provider":"Google Pay","api":"tramite Stripe/Nexi","env":["GOOGLE_PAY_MERCHANT_ID"],"use":"checkout veloce da Android e browser compatibili"},
+        {"provider":"SEPA Direct Debit","api":"Stripe SEPA / banca","env":["SEPA_CREDITOR_ID"],"use":"incasso ricorrente per contratti annuali"},
+        {"provider":"Bonifico","api":"manuale con riconciliazione interna","env":["BANK_IBAN","BANK_ACCOUNT_HOLDER"],"use":"contratti enterprise, PA, associazioni e partiti"},
+        {"provider":"Link di pagamento","api":"Stripe Payment Link / PayPal Link / Nexi Pay-by-Link","env":["PAYMENT_LINK_START","PAYMENT_LINK_PRO","PAYMENT_LINK_ENTERPRISE"],"use":"vendita rapida senza checkout custom"}
+    ]})
 
 @app.post("/api/super/api-keys")
 @super_required

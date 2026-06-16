@@ -661,3 +661,6 @@ Nel pannello `/admin` è stata aggiunta la sezione **Modalità di pagamento**. L
 I provider supportati/configurabili sono: Stripe, PayPal, Nexi, Satispay, PagoPA, Bonifico e Altro.
 
 In produzione le chiavi segrete non devono essere salvate nel browser o nel database come testo libero, ma impostate come variabili d'ambiente del server.
+
+## Aggiornamento UX, pagamenti e vendibilità
+Questa versione introduce una barra di navigazione orizzontale più fluida, ulteriori metodi di pagamento inclusa la Carta di Credito, provider configurabili dal SuperAdmin e un documento `UX_COMMERCIALE_E_NAVIGAZIONE.md` con layout consigliato per rendere la piattaforma più vendibile e più semplice da usare.
