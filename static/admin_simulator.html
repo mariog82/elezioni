@@ -1,0 +1,7 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Simulatore elettorale</title><link rel="stylesheet" href="/style.css"><script src="https://cdn.jsdelivr.net/npm/chart.js"></script></head><body>
+<header><h1>Simulatore elettorale</h1><div>Scenario builder: affluenza, swing, liste, sindaci e proiezioni</div></header><main>
+<section class="card topbar"><button class="secondary" onclick="location.href='/admin/modules'">Gestione moduli</button><button onclick="runSimulation()">Esegui simulazione</button></section>
+<section class="card warn"><h2>Parametri scenario</h2><div class="grid"><div><label>Variazione affluenza %</label><input id="turnoutDelta" type="number" value="0"></div><div><label>Swing sindaco target %</label><input id="mayorSwing" type="number" value="0"></div><div><label>Nome sindaco target</label><input id="targetMayor" placeholder="es. NICOLA BARBERA"></div><div><label>Swing lista target %</label><input id="listSwing" type="number" value="0"></div><div><label>Nome lista target</label><input id="targetList" placeholder="es. LISTA CIVICA"></div></div></section>
+<section class="card ok"><h2>Risultati simulati</h2><p id="simNote" class="small"></p><div class="grid"><canvas id="mayorChart"></canvas><canvas id="listChart"></canvas></div></section>
+<section class="card"><h2>Tabelle scenario</h2><div id="simTables" class="tablewrap"></div></section>
+</main><script src="/admin_simulator.js"></script></body></html>
