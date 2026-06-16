@@ -32,18 +32,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-try:
-    import numpy as np
-    from sklearn.cluster import KMeans
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import LinearRegression
-    SKLEARN_AVAILABLE = True
-except Exception:  # fallback per ambienti minimi
-    np = None
-    KMeans = None
-    RandomForestRegressor = None
-    LinearRegression = None
-    SKLEARN_AVAILABLE = False
+# Nessuna dipendenza pesante per l'AI: i moduli statistici/ML sono implementati in puro Python.
+# Questo evita problemi di build su Render/PyPI con scikit-learn e rende il deploy più stabile.
+SKLEARN_AVAILABLE = False
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DATABASE_SQLITE_PATH", os.path.join(APP_DIR, "database.sqlite"))
@@ -61,6 +52,72 @@ MODULE_CATALOG = {
 }
 DEFAULT_MODULES = {k: True for k in MODULE_CATALOG}
 DEFAULT_ELECTION_DATA = {"mayors": [], "lists": {}}
+
+SALES_VERSION_CATALOG = {
+    "starter": {
+        "name": "Focus360 Political START",
+        "target": "liste civiche, singoli candidati, piccole campagne comunali",
+        "positioning": "Raccolta dati ordinata e dashboard essenziale: sostituisce WhatsApp, Excel e telefonate.",
+        "monthly_price": 149,
+        "annual_price": 1490,
+        "setup_price": 490,
+        "currency": "EUR",
+        "limits": {"admins": 2, "operators": 30, "sections": 40, "api_calls_month": 1000, "elections": 1},
+        "modules": {"intelligence": False, "social": True, "blockchain": False, "osint": False, "simulator": False},
+        "features": [
+            "gestione tenant e admin", "import CSV anagrafiche", "rilevazione voti per sezione",
+            "quadratura automatica", "dashboard pubblica", "card social e report base"
+        ],
+        "sales_argument": "Prezzo accessibile, adatto a chi vuole controllo immediato dello scrutinio senza funzioni complesse."
+    },
+    "professional": {
+        "name": "Focus360 Political PRO",
+        "target": "coalizioni, candidati sindaco strutturati, comitati con più liste",
+        "positioning": "Intelligence elettorale concreta: analisi predittiva, peso politico, audit e API per integrazioni.",
+        "monthly_price": 399,
+        "annual_price": 3990,
+        "setup_price": 990,
+        "currency": "EUR",
+        "limits": {"admins": 8, "operators": 150, "sections": 180, "api_calls_month": 15000, "elections": 3},
+        "modules": {"intelligence": True, "social": True, "blockchain": True, "osint": False, "simulator": True},
+        "features": [
+            "tutto il piano START", "AI statistica e machine learning in puro Python",
+            "proiezioni Bayes/Laplace", "regressione affluenza", "clustering sezioni",
+            "simulatore swing", "audit hash-chain", "API pubbliche Bearer"
+        ],
+        "sales_argument": "È il piano consigliato: trasforma la raccolta voti in supporto decisionale e giustifica un salto di prezzo chiaro."
+    },
+    "enterprise": {
+        "name": "Focus360 Political ENTERPRISE",
+        "target": "partiti, federazioni provinciali/regionali, grandi organizzazioni politiche",
+        "positioning": "Piattaforma completa multi-organizzazione con OSINT, AI avanzata, API estese e governance commerciale.",
+        "monthly_price": 990,
+        "annual_price": 9900,
+        "setup_price": 2500,
+        "currency": "EUR",
+        "limits": {"admins": 30, "operators": 1000, "sections": 1200, "api_calls_month": 100000, "elections": 20},
+        "modules": {"intelligence": True, "social": True, "blockchain": True, "osint": True, "simulator": True},
+        "features": [
+            "tutto il piano PRO", "OSINT politico", "gestione molte campagne/tenant",
+            "API ad alto volume", "priorità supporto", "personalizzazioni commerciali",
+            "audit avanzato e report direzionali"
+        ],
+        "sales_argument": "Pensato per chi deve gestire molti territori e vuole un prodotto SaaS vendibile come standard organizzativo."
+    }
+}
+
+def plan_payload(plan_key: str) -> Dict[str, Any]:
+    return SALES_VERSION_CATALOG.get((plan_key or "starter").lower(), SALES_VERSION_CATALOG["starter"])
+
+def apply_sales_plan(conn: sqlite3.Connection, tenant_id: int, plan_key: str, months: int = 12) -> None:
+    plan_key = (plan_key or "starter").lower()
+    plan = plan_payload(plan_key)
+    exp = (datetime.now() + timedelta(days=30*int(months or 12))).date().isoformat()
+    conn.execute("UPDATE tenants SET plan=?, expires_at=?, updated_at=? WHERE id=?", (plan_key, exp, now(), tenant_id))
+    for mk in MODULE_CATALOG:
+        enabled = bool(plan.get("modules", {}).get(mk, False))
+        conn.execute("INSERT OR REPLACE INTO tenant_modules(tenant_id,module_key,enabled,expires_at,updated_at) VALUES(?,?,?,?,?)", (tenant_id, mk, int(enabled), exp, now()))
+    conn.execute("INSERT OR REPLACE INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)", (tenant_id, "sales_plan_json", json.dumps(plan, ensure_ascii=False)))
 
 
 def now() -> str:
@@ -233,6 +290,23 @@ def init_db() -> None:
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""")
 
+    c.execute("""CREATE TABLE IF NOT EXISTS sales_versions(
+        plan_key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        target TEXT,
+        positioning TEXT,
+        monthly_price REAL NOT NULL DEFAULT 0,
+        annual_price REAL NOT NULL DEFAULT 0,
+        setup_price REAL NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'EUR',
+        modules_json TEXT NOT NULL DEFAULT '{}',
+        limits_json TEXT NOT NULL DEFAULT '{}',
+        features_json TEXT NOT NULL DEFAULT '[]',
+        sales_argument TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT
+    )""")
+
     # default tenant + superadmin
     if not c.execute("SELECT id FROM tenants WHERE slug='platform-demo'").fetchone():
         c.execute("INSERT INTO tenants(name,slug,place,province,region,plan,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -262,6 +336,12 @@ def init_db() -> None:
             c.execute("INSERT OR IGNORE INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)", (tid,k,v))
         for mk,en in DEFAULT_MODULES.items():
             c.execute("INSERT OR IGNORE INTO tenant_modules(tenant_id,module_key,enabled,updated_at) VALUES(?,?,?,?)", (tid,mk,int(en),now()))
+
+    # catalogo commerciale: tre versioni vendibili modificabili da SuperAdmin
+    for key, plan in SALES_VERSION_CATALOG.items():
+        c.execute("""INSERT OR IGNORE INTO sales_versions(plan_key,name,target,positioning,monthly_price,annual_price,setup_price,currency,modules_json,limits_json,features_json,sales_argument,active,updated_at)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (key, plan["name"], plan["target"], plan["positioning"], plan["monthly_price"], plan["annual_price"], plan["setup_price"], plan["currency"], json.dumps(plan["modules"], ensure_ascii=False), json.dumps(plan["limits"], ensure_ascii=False), json.dumps(plan["features"], ensure_ascii=False), plan["sales_argument"], 1, now()))
 
     # indici tenant-aware
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_tenant_section ON reports(tenant_id, section)")
@@ -602,26 +682,42 @@ def ai_payload(conn: sqlite3.Connection, tid:int) -> Dict[str,Any]:
         p=(val+1)/(total_lists+k) if total_lists+k else 0
         bayes_lists.append({"name":name,"current":val,"probability_pct":round(p*100,2),"projected":round(val+missing*p),"method":"Laplace/Bayes multinomiale"})
     bayes_lists.sort(key=lambda x:x["projected"], reverse=True)
-    # ML turnout regression over section index
-    ml={"available":SKLEARN_AVAILABLE,"turnout_regression":[],"winner_prediction":None,"clusters":[],"anomalies":[]}
+    # ML/statistica in puro Python: regressione lineare semplice, clustering euristico e anomalie z-score
+    ml={"available":True,"engine":"pure-python-statistical-ml","turnout_regression":[],"winner_prediction":None,"clusters":[],"anomalies":[]}
     if sections:
-        xs=[]; y=[]
+        x_vals=[]; y_vals=[]
         for i,s in enumerate(sections,1):
             try: idx=float(str(s["section"]).replace("bis",".5"))
             except Exception: idx=float(i)
-            xs.append([idx, 1 if s.get("closed") else 0, s.get("valid_lists",0)]); y.append(float(s.get("voters",0)))
-        if SKLEARN_AVAILABLE and len(xs)>=2:
-            X=np.array(xs); Y=np.array(y); model=LinearRegression().fit(X,Y)
-            for i,s in enumerate(sections,1):
-                pred=max(0,float(model.predict(np.array([xs[i-1]]))[0])); ml["turnout_regression"].append({"section":s["section"],"actual_voters":s.get("voters",0),"predicted_voters":round(pred,1),"residual":round(s.get("voters",0)-pred,1)})
-            if len(sections)>=3:
-                features=np.array([[s.get("voters",0),s.get("valid_lists",0),s.get("invalid_rate_pct",0)] for s in heat])
-                n=min(3,len(sections)); labels=KMeans(n_clusters=n, n_init=10, random_state=7).fit_predict(features)
-                for lab,s in zip(labels,heat): ml["clusters"].append({"section":s["section"],"cluster":int(lab),"profile":"alta intensità" if s.get("voters",0)> (total_voters/len(sections) if sections else 0) else "bassa/media intensità"})
-        avg_invalid=sum(h["invalid_rate_pct"] for h in heat)/len(heat) if heat else 0
+            x_vals.append(idx); y_vals.append(float(s.get("voters",0)))
+        if len(x_vals)>=2:
+            mx=sum(x_vals)/len(x_vals); my=sum(y_vals)/len(y_vals)
+            den=sum((x-mx)**2 for x in x_vals) or 1.0
+            beta=sum((x-mx)*(y-my) for x,y in zip(x_vals,y_vals))/den
+            alpha=my-beta*mx
+            for x,s in zip(x_vals,sections):
+                pred=max(0, alpha+beta*x)
+                ml["turnout_regression"].append({"section":s["section"],"actual_voters":s.get("voters",0),"predicted_voters":round(pred,1),"residual":round(s.get("voters",0)-pred,1),"model":"linear_regression_pure_python"})
+        if heat:
+            avg_v=sum(h.get("voters",0) for h in heat)/len(heat)
+            avg_valid=sum(h.get("valid_votes",0) for h in heat)/len(heat)
+            for h in heat:
+                intensity=(h.get("voters",0)/(avg_v or 1))*0.65 + (h.get("valid_votes",0)/(avg_valid or 1))*0.35
+                if intensity>=1.25: cluster=2; profile="alta intensità elettorale"
+                elif intensity<=0.75: cluster=0; profile="bassa intensità elettorale"
+                else: cluster=1; profile="media intensità elettorale"
+                ml["clusters"].append({"section":h["section"],"cluster":cluster,"profile":profile,"intensity_index":round(intensity,2)})
+        invalid_rates=[h["invalid_rate_pct"] for h in heat]
+        voters_vals=[h.get("voters",0) for h in heat]
+        avg_invalid=sum(invalid_rates)/len(invalid_rates) if invalid_rates else 0
+        avg_voters=sum(voters_vals)/len(voters_vals) if voters_vals else 0
+        sd_invalid=(sum((v-avg_invalid)**2 for v in invalid_rates)/len(invalid_rates))**0.5 if invalid_rates else 0
+        sd_voters=(sum((v-avg_voters)**2 for v in voters_vals)/len(voters_vals))**0.5 if voters_vals else 0
         for h in heat:
-            if h["invalid_rate_pct"] > avg_invalid+8 or (total_voters and h.get("voters",0)>2*(total_voters/len(heat))):
-                ml["anomalies"].append({"section":h["section"],"reason":"scostamento statistico su invalidità/affluenza", "invalid_rate_pct":h["invalid_rate_pct"], "voters":h.get("voters",0)})
+            z_inv=(h["invalid_rate_pct"]-avg_invalid)/(sd_invalid or 1)
+            z_vot=(h.get("voters",0)-avg_voters)/(sd_voters or 1)
+            if abs(z_inv)>=2 or abs(z_vot)>=2 or h["invalid_rate_pct"] > avg_invalid+8:
+                ml["anomalies"].append({"section":h["section"],"reason":"anomalia statistica su schede non valide o affluenza", "invalid_rate_pct":h["invalid_rate_pct"], "voters":h.get("voters",0),"z_invalid":round(z_inv,2),"z_voters":round(z_vot,2)})
     if bayes_lists: ml["winner_prediction"]={"leader":bayes_lists[0]["name"],"projected_votes":bayes_lists[0]["projected"],"confidence":"media" if len(sections)>=5 else "bassa: poche sezioni caricate"}
     # political weight
     political=[]
@@ -629,7 +725,7 @@ def ai_payload(conn: sqlite3.Connection, tid:int) -> Dict[str,Any]:
         ltot=ag["list_totals"].get(lname,0); score=min(100, round((votes/(ltot or 1))*55 + math.log1p(votes)*9,2))
         political.append({"candidate":cand,"list":lname,"preferences":votes,"list_total":ltot,"preference_on_list_pct":round(votes/(ltot or 1)*100,2),"body_index":score})
     political.sort(key=lambda x:(-x["body_index"],-x["preferences"]))
-    return {"ok":True,"tenant_id":tid,"summary":{"sections_loaded":len(sections),"sections_closed":sum(1 for s in sections if s.get("closed")),"observed_voters":total_voters,"total_list_votes":total_lists,"total_mayor_votes":total_mayors,"sklearn_available":SKLEARN_AVAILABLE},"heatmap":heat,"prediction":{"lists":bayes_lists,"method":"proiezione Bayes/Laplace con target votanti configurato; non è un sondaggio"},"machine_learning":ml,"political_weight":political,"social_cards":[{"rank":i+1,**p,"political_score":p["body_index"],"share_text":f"{p['candidate']} · {p['list']} · Political Score {p['body_index']}/100"} for i,p in enumerate(political[:50])],"data":ag["election_data"]}
+    return {"ok":True,"tenant_id":tid,"summary":{"sections_loaded":len(sections),"sections_closed":sum(1 for s in sections if s.get("closed")),"observed_voters":total_voters,"total_list_votes":total_lists,"total_mayor_votes":total_mayors,"ml_engine":"pure-python-statistical-ml"},"heatmap":heat,"prediction":{"lists":bayes_lists,"method":"proiezione Bayes/Laplace con target votanti configurato; non è un sondaggio"},"machine_learning":ml,"political_weight":political,"social_cards":[{"rank":i+1,**p,"political_score":p["body_index"],"share_text":f"{p['candidate']} · {p['list']} · Political Score {p['body_index']}/100"} for i,p in enumerate(political[:50])],"data":ag["election_data"]}
 
 @app.get("/api/intelligence")
 @admin_required
@@ -651,13 +747,18 @@ def ai_predictive():
 def super_overview():
     conn=db(); tenants=[dict(r) for r in conn.execute("SELECT * FROM tenants ORDER BY id").fetchall()]; users=[dict(r) for r in conn.execute("SELECT id,tenant_id,name,phone,role,section,active FROM users ORDER BY tenant_id,id").fetchall()]; payments=[dict(r) for r in conn.execute("SELECT * FROM payment_methods ORDER BY id DESC").fetchall()]
     profiles={str(r["user_id"]):dict(r) for r in conn.execute("SELECT * FROM admin_profiles").fetchall()}
+    sales_versions=[]
+    for r in conn.execute("SELECT * FROM sales_versions WHERE active=1 ORDER BY monthly_price").fetchall():
+        d=dict(r); d["modules"]=safe_json_loads(d.pop("modules_json", "{}"), {}); d["limits"]=safe_json_loads(d.pop("limits_json", "{}"), {}); d["features"]=safe_json_loads(d.pop("features_json", "[]"), []); sales_versions.append(d)
     permissions={}
+    tenant_modules={}
+    for t in tenants: tenant_modules[str(t["id"])] = get_tenant_modules(conn, t["id"])
     for u in users:
         if u["role"]=="admin":
             fake=conn.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone(); permissions[str(u["id"])] = get_user_modules(conn,fake)
     modules=[]
     for k,v in MODULE_CATALOG.items(): modules.append({"key":k,**v,"enabled":True})
-    conn.close(); return jsonify({"ok":True,"tenants":tenants,"modules":modules,"users":users,"profiles":profiles,"payments":payments,"permissions":permissions})
+    conn.close(); return jsonify({"ok":True,"tenants":tenants,"tenant_modules":tenant_modules,"sales_versions":sales_versions,"modules":modules,"users":users,"profiles":profiles,"payments":payments,"permissions":permissions})
 
 @app.post("/api/super/tenants")
 @super_required
@@ -665,7 +766,7 @@ def create_tenant():
     data=request.get_json(force=True); name=str(data.get("name") or data.get("organization") or "Nuova organizzazione").strip(); slug=slugify(data.get("slug") or name); exp=data.get("expires_at") or (datetime.now()+timedelta(days=90)).date().isoformat()
     conn=db(); conn.execute("INSERT INTO tenants(name,slug,organization_type,place,cap,province,region,plan,status,expires_at,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(name,slug,data.get("organization_type","organizzazione politica"),data.get("place"),data.get("cap"),data.get("province"),data.get("region"),data.get("plan","trial"),data.get("status","active"),exp,data.get("notes"),now(),now()))
     tid=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    for k,en in DEFAULT_MODULES.items(): conn.execute("INSERT INTO tenant_modules(tenant_id,module_key,enabled,updated_at) VALUES(?,?,?,?)",(tid,k,int(en),now()))
+    apply_sales_plan(conn, tid, data.get("plan", "starter"), 12)
     for k,v in {"total_electors":"0","total_voters":"0","council_seats":"24","winner_mayor":"","mode":"first","election_data_json":json.dumps(DEFAULT_ELECTION_DATA,ensure_ascii=False)}.items(): conn.execute("INSERT INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)",(tid,k,v))
     audit(conn,tid,current_user()["id"],"create_tenant","tenants",data); conn.commit(); conn.close(); return jsonify({"ok":True,"tenant_id":tid,"slug":slug})
 
@@ -677,7 +778,7 @@ def create_admin_super():
         # crea tenant automaticamente dai dati commerciali, stile Focus360AI
         res_data={"name":data.get("organization") or data.get("name") or "Organizzazione politica", "place":data.get("place"),"cap":data.get("cap"),"province":data.get("province"),"region":data.get("region"),"plan":data.get("plan","trial")}
         conn=db(); slug=slugify(res_data["name"]); conn.execute("INSERT INTO tenants(name,slug,place,cap,province,region,plan,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(res_data["name"],slug,res_data.get("place"),res_data.get("cap"),res_data.get("province"),res_data.get("region"),res_data.get("plan"),"active",(datetime.now()+timedelta(days=90)).date().isoformat(),now(),now())); tenant_id=conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-        for k,en in DEFAULT_MODULES.items(): conn.execute("INSERT INTO tenant_modules(tenant_id,module_key,enabled,updated_at) VALUES(?,?,?,?)",(tenant_id,k,int(en),now()))
+        apply_sales_plan(conn, tenant_id, res_data.get("plan", "starter"), 12)
         for k,v in {"total_electors":"0","total_voters":"0","council_seats":"24","winner_mayor":"","mode":"first","election_data_json":json.dumps(DEFAULT_ELECTION_DATA,ensure_ascii=False)}.items(): conn.execute("INSERT INTO tenant_settings(tenant_id,key,value) VALUES(?,?,?)",(tenant_id,k,v))
     else: conn=db()
     name=str(data.get("name","")).strip(); phone=str(data.get("phone","")).strip(); pin=str(data.get("pin","")).strip()
@@ -712,6 +813,33 @@ def providers():
 def create_api_key():
     d=request.get_json(force=True); tid=int(d.get("tenant_id")); raw="fp_"+secrets.token_urlsafe(32); prefix=raw[:10]
     conn=db(); conn.execute("INSERT INTO api_keys(tenant_id,name,key_hash,prefix,scopes,active,created_at) VALUES(?,?,?,?,?,?,?)",(tid,d.get("name","API Key"),hash_api_key(raw),prefix,d.get("scopes","read"),1,now())); conn.commit(); conn.close(); return jsonify({"ok":True,"api_key":raw,"prefix":prefix,"warning":"Salvare ora la chiave: non sarà più mostrata."})
+
+@app.get("/api/super/sales-versions")
+@super_required
+def sales_versions_get():
+    conn=db(); rows=[]
+    for r in conn.execute("SELECT * FROM sales_versions WHERE active=1 ORDER BY monthly_price").fetchall():
+        d=dict(r); d["modules"]=safe_json_loads(d.pop("modules_json", "{}"), {}); d["limits"]=safe_json_loads(d.pop("limits_json", "{}"), {}); d["features"]=safe_json_loads(d.pop("features_json", "[]"), []); rows.append(d)
+    conn.close(); return jsonify({"ok":True,"sales_versions":rows})
+
+@app.post("/api/super/sales-versions/<plan_key>")
+@super_required
+def sales_versions_update(plan_key: str):
+    d=request.get_json(force=True); plan_key=plan_key.lower().strip()
+    conn=db(); conn.execute("""INSERT OR REPLACE INTO sales_versions(plan_key,name,target,positioning,monthly_price,annual_price,setup_price,currency,modules_json,limits_json,features_json,sales_argument,active,updated_at)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (plan_key, d.get("name"), d.get("target"), d.get("positioning"), float(d.get("monthly_price") or 0), float(d.get("annual_price") or 0), float(d.get("setup_price") or 0), d.get("currency","EUR"), json.dumps(d.get("modules",{}), ensure_ascii=False), json.dumps(d.get("limits",{}), ensure_ascii=False), json.dumps(d.get("features",[]), ensure_ascii=False), d.get("sales_argument"), int(bool(d.get("active", True))), now()))
+    conn.commit(); conn.close(); return jsonify({"ok":True,"plan_key":plan_key})
+
+@app.post("/api/super/tenants/<int:tenant_id>/plan")
+@super_required
+def tenant_apply_plan(tenant_id: int):
+    d=request.get_json(force=True); plan_key=(d.get("plan") or d.get("plan_key") or "starter").lower(); months=int(d.get("months") or 12)
+    conn=db(); t=conn.execute("SELECT id FROM tenants WHERE id=?",(tenant_id,)).fetchone()
+    if not t: conn.close(); return jsonify({"ok":False,"error":"Tenant non trovato"}),404
+    apply_sales_plan(conn, tenant_id, plan_key, months)
+    audit(conn,tenant_id,current_user()["id"],"apply_sales_plan","tenants",d)
+    conn.commit(); conn.close(); return jsonify({"ok":True,"tenant_id":tenant_id,"plan":plan_key})
 
 # Public API v1
 @app.get("/api/v1/tenant")

@@ -127,3 +127,13 @@ DATABASE_SQLITE_PATH=/opt/render/project/src/database.sqlite
 STRIPE_PUBLIC_KEY=...
 STRIPE_SECRET_KEY=...
 ```
+
+## Fix deploy Render senza scikit-learn
+Questa versione non richiede più `numpy` e `scikit-learn` in `requirements.txt`.
+I moduli AI usano un motore statistico/ML in puro Python:
+- proiezione Bayes/Laplace;
+- regressione lineare semplice per affluenza;
+- clustering euristico per intensità elettorale;
+- rilevazione anomalie con z-score.
+
+Questo riduce i problemi di build su Render/PyPI e mantiene attive le funzioni predittive principali.
